@@ -8,7 +8,6 @@ import ctypes
 import numpy as np
 import cv2
 
-# Activar DPI Awareness
 try:
     ctypes.windll.shcore.SetProcessDpiAwareness(2)
 except Exception:
@@ -23,6 +22,13 @@ try:
 except ImportError:
     HAS_MSS = False
 
+try:
+    import win32gui
+    import win32con
+    HAS_WIN32 = True
+except ImportError:
+    HAS_WIN32 = False
+
 from PIL import ImageGrab
 from pynput.mouse import Controller as MouseController, Button
 from pynput.keyboard import Controller as KeyboardController, Key
@@ -33,14 +39,49 @@ PORT_INPUT = 5556
 mouse = MouseController()
 keyboard = KeyboardController()
 
-# Configuraciones de calidad intercambiables
-# 1: Rapido (75%), 2: Equilibrado (85% por defecto, recomendado), 3: Ultra HD (92%)
 current_mode = 2
 QUALITY_PRESETS = {
     1: [cv2.IMWRITE_JPEG_QUALITY, 75, cv2.IMWRITE_JPEG_OPTIMIZE, 0],
     2: [cv2.IMWRITE_JPEG_QUALITY, 85, cv2.IMWRITE_JPEG_OPTIMIZE, 0],
     3: [cv2.IMWRITE_JPEG_QUALITY, 92, cv2.IMWRITE_JPEG_SAMPLING_FACTOR, cv2.IMWRITE_JPEG_SAMPLING_FACTOR_444]
 }
+
+# Codigos de cursores de Windows sincronizados en tiempo real
+CURSOR_CODES = {
+    'arrow': 0,
+    'ibeam': 1,      # Texto / input / punto de insercion
+    'hand': 2,       # Enlaces / botones clickeables
+    'cross': 3,      # Cruz / seleccion
+    'wait': 4,       # Espera / reloj de arena / circulo giratorio
+    'sizens': 5,     # Redimensionar vertical
+    'sizewe': 6,     # Redimensionar horizontal
+    'sizenwse': 7,   # Redimensionar diagonal 1
+    'sizenesw': 8,   # Redimensionar diagonal 2
+    'sizeall': 9,    # Mover ventana / 4 flechas
+    'no': 10         # Accion no permitida
+}
+
+SYSTEM_CURSORS = {}
+if HAS_WIN32:
+    for name, cid in [
+        ('arrow', win32con.IDC_ARROW),
+        ('ibeam', win32con.IDC_IBEAM),
+        ('hand', win32con.IDC_HAND),
+        ('cross', win32con.IDC_CROSS),
+        ('wait', win32con.IDC_WAIT),
+        ('sizens', win32con.IDC_SIZENS),
+        ('sizewe', win32con.IDC_SIZEWE),
+        ('sizenwse', win32con.IDC_SIZENWSE),
+        ('sizenesw', win32con.IDC_SIZENESW),
+        ('sizeall', win32con.IDC_SIZEALL),
+        ('no', win32con.IDC_NO),
+    ]:
+        try:
+            h = win32gui.LoadCursor(0, cid)
+            if h:
+                SYSTEM_CURSORS[h] = name
+        except Exception:
+            pass
 
 KEY_MAP = {
     'enter': Key.enter,
@@ -49,8 +90,15 @@ KEY_MAP = {
     'tab': Key.tab,
     'space': Key.space,
     'shift': Key.shift,
+    'left shift': Key.shift_l,
+    'right shift': Key.shift_r,
     'ctrl': Key.ctrl,
+    'left ctrl': Key.ctrl_l,
+    'right ctrl': Key.ctrl_r,
     'alt': Key.alt,
+    'left alt': Key.alt_l,
+    'right alt': Key.alt_r,
+    'alt gr': Key.alt_gr,
     'esc': Key.esc,
     'escape': Key.esc,
     'up': Key.up,
@@ -58,23 +106,18 @@ KEY_MAP = {
     'left': Key.left,
     'right': Key.right,
     'delete': Key.delete,
+    'insert': Key.insert,
     'home': Key.home,
     'end': Key.end,
     'pageup': Key.page_up,
     'pagedown': Key.page_down,
     'caps_lock': Key.caps_lock,
-    'f1': Key.f1,
-    'f2': Key.f2,
-    'f3': Key.f3,
-    'f4': Key.f4,
-    'f5': Key.f5,
-    'f6': Key.f6,
-    'f7': Key.f7,
-    'f8': Key.f8,
-    'f9': Key.f9,
-    'f10': Key.f10,
-    'f11': Key.f11,
-    'f12': Key.f12
+    'left windows': Key.cmd,
+    'right windows': Key.cmd,
+    'print screen': Key.print_screen,
+    'f1': Key.f1, 'f2': Key.f2, 'f3': Key.f3, 'f4': Key.f4,
+    'f5': Key.f5, 'f6': Key.f6, 'f7': Key.f7, 'f8': Key.f8,
+    'f9': Key.f9, 'f10': Key.f10, 'f11': Key.f11, 'f12': Key.f12
 }
 
 def get_local_ip():
@@ -92,7 +135,27 @@ def get_screen_size():
     user32 = ctypes.windll.user32
     return user32.GetSystemMetrics(0), user32.GetSystemMetrics(1)
 
-# Instancia persistente de mss para evitar recrear contextos GDI en cada frame
+def get_active_cursor():
+    if not HAS_WIN32:
+        return 'arrow'
+    try:
+        flags, hcur, _ = win32gui.GetCursorInfo()
+        if (flags & 1) and hcur:
+            if hcur in SYSTEM_CURSORS:
+                return SYSTEM_CURSORS[hcur]
+            # Si el handle no coincide directo, inspeccionar el hotspot
+            info = win32gui.GetIconInfo(hcur)
+            x_hot, y_hot = info[1], info[2]
+            win32gui.DeleteObject(info[3])
+            if info[4]:
+                win32gui.DeleteObject(info[4])
+            # El cursor de texto I-Beam casi siempre tiene hotspot central
+            if 6 <= x_hot <= 10 and 8 <= y_hot <= 14:
+                return 'ibeam'
+    except Exception:
+        pass
+    return 'arrow'
+
 sct_instance = None
 if HAS_MSS:
     try:
@@ -109,23 +172,9 @@ def capture_screen():
             return img[:, :, :3]
         except Exception:
             pass
-    # Fallback
     pil_img = ImageGrab.grab(all_screens=False)
     frame = np.array(pil_img)
     return cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-
-def draw_cursor(frame):
-    try:
-        cx, cy = mouse.position
-        h, w = frame.shape[:2]
-        if 0 <= cx < w and 0 <= cy < h:
-            pts = np.array([[cx, cy], [cx, cy + 18], [cx + 5, cy + 14], [cx + 10, cy + 22],
-                            [cx + 13, cy + 20], [cx + 8, cy + 12], [cx + 14, cy + 12]], np.int32)
-            cv2.fillPoly(frame, [pts], (255, 255, 255))
-            cv2.polylines(frame, [pts], True, (0, 0, 0), 1, cv2.LINE_AA)
-    except Exception:
-        pass
-    return frame
 
 def handle_input(conn):
     global current_mode
@@ -212,7 +261,6 @@ def handle_input(conn):
 def video_server():
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    # Aumentar buffer de envio para no bloquear
     server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1024 * 1024)
     server_socket.bind(('0.0.0.0', PORT_VIDEO))
     server_socket.listen(1)
@@ -232,34 +280,39 @@ def video_server():
             prev_sample = None
             last_sent_time = 0
             last_mouse_pos = (-1, -1)
+            last_cursor_code = -1
 
             while True:
                 now = time.time()
                 frame = capture_screen()
 
-                # Detección ultra-rápida de cambios (strided diff: 1.1ms)
                 curr_sample = frame[::16, ::16]
                 curr_mouse = mouse.position
+                cur_name = get_active_cursor()
+                cur_code = CURSOR_CODES.get(cur_name, 0)
 
                 has_changed = (
                     prev_sample is None or
                     curr_mouse != last_mouse_pos or
+                    cur_code != last_cursor_code or
                     cv2.absdiff(curr_sample, prev_sample).any() or
-                    (now - last_sent_time > 0.3)  # Keepalive cada 300ms
+                    (now - last_sent_time > 0.3)
                 )
 
                 if has_changed:
                     prev_sample = curr_sample
                     last_mouse_pos = curr_mouse
+                    last_cursor_code = cur_code
                     last_sent_time = now
 
-                    frame = draw_cursor(frame)
                     encode_params = QUALITY_PRESETS.get(current_mode, QUALITY_PRESETS[2])
                     _, enc_img = cv2.imencode('.jpg', frame, encode_params)
                     data = enc_img.tobytes()
-                    conn.sendall(struct.pack('>I', len(data)) + data)
+
+                    # Cabecera de 5 bytes: 4 bytes tamaño + 1 byte codigo del cursor en vivo
+                    hdr = struct.pack('>IB', len(data), cur_code)
+                    conn.sendall(hdr + data)
                 else:
-                    # Si no hay cambios, pausar 4ms para ahorrar 100% de CPU
                     time.sleep(0.004)
 
         except (BrokenPipeError, ConnectionResetError):
@@ -285,10 +338,10 @@ def main():
     ip = get_local_ip()
     w, h = get_screen_size()
     print("=" * 65)
-    print("       SERVIDOR DE CONTROL REMOTO LAN - ALTO RENDIMIENTO       ")
+    print("    SERVIDOR DE CONTROL REMOTO LAN - CURSORES DINAMICOS EN VIVO    ")
     print("=" * 65)
     print(f">> Resolucion nativa: {w}x{h}")
-    print(f">> Optimizaciones: Persistent MSS, Strided Diff, Zero-Copy TCP")
+    print(f">> Cursores sincronizados: Texto (I-Beam), Enlaces (Hand), Resize")
     print(f">> Modos de calidad: [1] Rapido | [2] Equilibrado | [3] Ultra HD")
     print(f">> TU DIRECCION IP LOCAL: {ip}\n")
     print("Esperando conexion del cliente...")

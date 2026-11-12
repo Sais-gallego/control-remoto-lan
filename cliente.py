@@ -34,7 +34,7 @@ def recv_all(sock, size):
 
 def main():
     print("=" * 65)
-    print("       CLIENTE DE CONTROL REMOTO LAN - ALTO RENDIMIENTO       ")
+    print("    CLIENTE DE CONTROL REMOTO LAN - CURSORES DINAMICOS EN VIVO    ")
     print("=" * 65)
 
     if len(sys.argv) > 1:
@@ -75,6 +75,21 @@ def main():
 
     pygame.init()
 
+    # Mapeo de códigos de cursor a cursores nativos de Pygame
+    CODE_TO_CURSOR = {
+        0: pygame.SYSTEM_CURSOR_ARROW,
+        1: pygame.SYSTEM_CURSOR_IBEAM,
+        2: pygame.SYSTEM_CURSOR_HAND,
+        3: pygame.SYSTEM_CURSOR_CROSSHAIR,
+        4: pygame.SYSTEM_CURSOR_WAIT,
+        5: pygame.SYSTEM_CURSOR_SIZENS,
+        6: pygame.SYSTEM_CURSOR_SIZEWE,
+        7: pygame.SYSTEM_CURSOR_SIZENWSE,
+        8: pygame.SYSTEM_CURSOR_SIZENESW,
+        9: pygame.SYSTEM_CURSOR_SIZEALL,
+        10: pygame.SYSTEM_CURSOR_NO
+    }
+
     local_info = pygame.display.Info()
     local_w, local_h = local_info.current_w, local_info.current_h
 
@@ -90,7 +105,7 @@ def main():
 
     fullscreen = False
     current_mode = 2
-    mode_names = {1: "Rapido (Baja Latencia)", 2: "Equilibrado (Recomendado)", 3: "Ultra HD"}
+    mode_names = {1: "Rapido", 2: "Equilibrado", 3: "Ultra HD"}
 
     def update_title(fps=60):
         pygame.display.set_caption(
@@ -99,9 +114,10 @@ def main():
 
     update_title()
 
-    # Estado compartido entre hilos
     frame_lock = threading.Lock()
     latest_surface = None
+    latest_cursor_code = 0
+    active_cursor_code = -1
     running = True
 
     def send_event(ev_dict):
@@ -111,15 +127,16 @@ def main():
         except Exception:
             pass
 
-    # Hilo desacoplado para recibir y decodificar video continuamente sin trabar la interfaz
+    # Hilo desacoplado para recibir frames y cursores dinámicos
     def video_receiver_loop():
-        nonlocal latest_surface, running
+        nonlocal latest_surface, latest_cursor_code, running
         while running:
             try:
-                size_bytes = recv_all(video_sock, 4)
-                if not size_bytes:
+                # Cabecera de 5 bytes: 4 bytes tamaño + 1 byte codigo del cursor
+                hdr_bytes = recv_all(video_sock, 5)
+                if not hdr_bytes:
                     break
-                frame_size = struct.unpack('>I', size_bytes)[0]
+                frame_size, cur_code = struct.unpack('>IB', hdr_bytes)
                 frame_data = recv_all(video_sock, frame_size)
                 if not frame_data:
                     break
@@ -132,6 +149,7 @@ def main():
                     surf = pygame.image.frombuffer(frame_rgb.tobytes(), (native_w, native_h), 'RGB')
                     with frame_lock:
                         latest_surface = surf
+                        latest_cursor_code = cur_code
             except Exception:
                 break
         running = False
@@ -191,7 +209,6 @@ def main():
                 send_event({"type": "key_up", "key": kname, "char": char})
 
             elif event.type == pygame.MOUSEMOTION:
-                # Limitar envio de movimiento a maximo 100Hz (cada 10ms) para evitar congestión
                 if now - last_mouse_send >= 0.010:
                     mx, my = event.pos
                     nx = max(0.0, min(1.0, mx / win_w))
@@ -211,12 +228,20 @@ def main():
                 if event.button in (1, 2, 3):
                     send_event({"type": "mouse_up", "button": event.button})
 
-        # Dibujar frame mas reciente
-        surf_to_draw = None
+        # Actualizar cursor dinámicamente si cambió en la máquina remota
         with frame_lock:
-            if latest_surface is not None:
-                surf_to_draw = latest_surface
+            cur_code = latest_cursor_code
+            surf_to_draw = latest_surface
 
+        if cur_code != active_cursor_code:
+            active_cursor_code = cur_code
+            if cur_code in CODE_TO_CURSOR:
+                try:
+                    pygame.mouse.set_cursor(CODE_TO_CURSOR[cur_code])
+                except Exception:
+                    pass
+
+        # Dibujar frame
         if surf_to_draw is not None:
             if win_w == native_w and win_h == native_h:
                 screen.blit(surf_to_draw, (0, 0))
@@ -227,7 +252,6 @@ def main():
 
         clock.tick(60)
 
-        # Actualizar indicador de FPS cada segundo
         if now - title_timer >= 1.0:
             update_title(int(clock.get_fps()))
             title_timer = now
