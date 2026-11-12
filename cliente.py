@@ -22,6 +22,7 @@ import pygame
 
 PORT_VIDEO = 5555
 PORT_INPUT = 5556
+PORT_DISCOVERY = 5557
 
 def recv_all(sock, size):
     buf = bytearray()
@@ -32,15 +33,41 @@ def recv_all(sock, size):
         buf.extend(chunk)
     return bytes(buf)
 
+def auto_discover_server(timeout=1.2):
+    # Escucha la red local para detectar la otra PC automáticamente
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.settimeout(timeout)
+    detected_ip = None
+    try:
+        sock.bind(('', PORT_DISCOVERY))
+        data, addr = sock.recvfrom(1024)
+        info = json.loads(data.decode('utf-8'))
+        if info.get('app') == 'remote_lan_desk':
+            detected_ip = info.get('ip', addr[0])
+    except Exception:
+        pass
+    finally:
+        sock.close()
+    return detected_ip
+
 def main():
     print("=" * 65)
-    print("    CLIENTE DE CONTROL REMOTO LAN - CURSORES DINAMICOS EN VIVO    ")
+    print("              CLIENTE DE CONTROL REMOTO LAN                  ")
     print("=" * 65)
 
+    server_ip = None
     if len(sys.argv) > 1:
         server_ip = sys.argv[1].strip()
     else:
-        server_ip = input("Ingresa la direccion IP de la PC a manipular: ").strip()
+        print("Buscando computadora en la red local...")
+        discovered_ip = auto_discover_server(timeout=1.2)
+        if discovered_ip:
+            print(f">> ¡Computadora detectada en la red!: {discovered_ip}")
+            choice = input(f"Presiona Enter para conectar a [{discovered_ip}] o escribe otra IP: ").strip()
+            server_ip = choice if choice else discovered_ip
+        else:
+            server_ip = input("Ingresa la direccion IP de la PC a manipular: ").strip()
 
     if not server_ip:
         print("Direccion IP invalida.")
@@ -57,7 +84,7 @@ def main():
         input_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         input_sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         input_sock.connect((server_ip, PORT_INPUT))
-        print("¡Conexion de alta velocidad establecida!")
+        print("¡Conexion establecida con exito!")
     except Exception as e:
         print(f"Error al conectar con la PC destino: {e}")
         input("Presiona Enter para salir...")
@@ -75,7 +102,7 @@ def main():
 
     pygame.init()
 
-    # Mapeo de códigos de cursor a cursores nativos de Pygame
+    # Mapeo de códigos a cursores nativos
     CODE_TO_CURSOR = {
         0: pygame.SYSTEM_CURSOR_ARROW,
         1: pygame.SYSTEM_CURSOR_IBEAM,
@@ -101,19 +128,10 @@ def main():
         win_h = int(native_h * scale_factor)
 
     screen = pygame.display.set_mode((win_w, win_h), pygame.RESIZABLE)
+    pygame.display.set_caption(f"Control Remoto LAN - {server_ip} (F11: Pantalla Completa)")
     clock = pygame.time.Clock()
 
     fullscreen = False
-    current_mode = 2
-    mode_names = {1: "Rapido", 2: "Equilibrado", 3: "Ultra HD"}
-
-    def update_title(fps=60):
-        pygame.display.set_caption(
-            f"Control Remoto LAN | {fps} FPS | Modo: {mode_names.get(current_mode)} | Teclas: [1/2/3] Calidad - [F11] Pantalla Completa"
-        )
-
-    update_title()
-
     frame_lock = threading.Lock()
     latest_surface = None
     latest_cursor_code = 0
@@ -127,12 +145,10 @@ def main():
         except Exception:
             pass
 
-    # Hilo desacoplado para recibir frames y cursores dinámicos
     def video_receiver_loop():
         nonlocal latest_surface, latest_cursor_code, running
         while running:
             try:
-                # Cabecera de 5 bytes: 4 bytes tamaño + 1 byte codigo del cursor
                 hdr_bytes = recv_all(video_sock, 5)
                 if not hdr_bytes:
                     break
@@ -158,7 +174,6 @@ def main():
     t_recv.start()
 
     last_mouse_send = 0
-    title_timer = 0
 
     while running:
         now = time.time()
@@ -186,18 +201,6 @@ def main():
                 elif event.key == pygame.K_F10:
                     win_w, win_h = native_w, native_h
                     screen = pygame.display.set_mode((win_w, win_h), pygame.RESIZABLE)
-                elif event.key in (pygame.K_1, pygame.K_KP1):
-                    current_mode = 1
-                    send_event({"type": "set_mode", "mode": 1})
-                    update_title(int(clock.get_fps()))
-                elif event.key in (pygame.K_2, pygame.K_KP2):
-                    current_mode = 2
-                    send_event({"type": "set_mode", "mode": 2})
-                    update_title(int(clock.get_fps()))
-                elif event.key in (pygame.K_3, pygame.K_KP3):
-                    current_mode = 3
-                    send_event({"type": "set_mode", "mode": 3})
-                    update_title(int(clock.get_fps()))
                 else:
                     kname = pygame.key.name(event.key)
                     char = event.unicode if event.unicode else None
@@ -228,7 +231,7 @@ def main():
                 if event.button in (1, 2, 3):
                     send_event({"type": "mouse_up", "button": event.button})
 
-        # Actualizar cursor dinámicamente si cambió en la máquina remota
+        # Actualizar cursor automáticamente
         with frame_lock:
             cur_code = latest_cursor_code
             surf_to_draw = latest_surface
@@ -251,10 +254,6 @@ def main():
             pygame.display.flip()
 
         clock.tick(60)
-
-        if now - title_timer >= 1.0:
-            update_title(int(clock.get_fps()))
-            title_timer = now
 
     video_sock.close()
     input_sock.close()

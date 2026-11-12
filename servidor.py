@@ -8,6 +8,7 @@ import ctypes
 import numpy as np
 import cv2
 
+# Activar DPI Awareness
 try:
     ctypes.windll.shcore.SetProcessDpiAwareness(2)
 except Exception:
@@ -35,30 +36,27 @@ from pynput.keyboard import Controller as KeyboardController, Key
 
 PORT_VIDEO = 5555
 PORT_INPUT = 5556
+PORT_DISCOVERY = 5557
 
 mouse = MouseController()
 keyboard = KeyboardController()
 
-current_mode = 2
-QUALITY_PRESETS = {
-    1: [cv2.IMWRITE_JPEG_QUALITY, 75, cv2.IMWRITE_JPEG_OPTIMIZE, 0],
-    2: [cv2.IMWRITE_JPEG_QUALITY, 85, cv2.IMWRITE_JPEG_OPTIMIZE, 0],
-    3: [cv2.IMWRITE_JPEG_QUALITY, 92, cv2.IMWRITE_JPEG_SAMPLING_FACTOR, cv2.IMWRITE_JPEG_SAMPLING_FACTOR_444]
-}
+# Modo unico equilibrado: rapido, nitido y sin complicaciones
+ENCODE_PARAMS = [cv2.IMWRITE_JPEG_QUALITY, 85, cv2.IMWRITE_JPEG_OPTIMIZE, 0]
 
-# Codigos de cursores de Windows sincronizados en tiempo real
+# Codigos de cursores nativos sincronizados
 CURSOR_CODES = {
     'arrow': 0,
     'ibeam': 1,      # Texto / input / punto de insercion
     'hand': 2,       # Enlaces / botones clickeables
-    'cross': 3,      # Cruz / seleccion
-    'wait': 4,       # Espera / reloj de arena / circulo giratorio
+    'cross': 3,      # Cruz
+    'wait': 4,       # Espera
     'sizens': 5,     # Redimensionar vertical
     'sizewe': 6,     # Redimensionar horizontal
     'sizenwse': 7,   # Redimensionar diagonal 1
     'sizenesw': 8,   # Redimensionar diagonal 2
-    'sizeall': 9,    # Mover ventana / 4 flechas
-    'no': 10         # Accion no permitida
+    'sizeall': 9,    # Mover ventana
+    'no': 10         # Prohibido
 }
 
 SYSTEM_CURSORS = {}
@@ -143,13 +141,11 @@ def get_active_cursor():
         if (flags & 1) and hcur:
             if hcur in SYSTEM_CURSORS:
                 return SYSTEM_CURSORS[hcur]
-            # Si el handle no coincide directo, inspeccionar el hotspot
             info = win32gui.GetIconInfo(hcur)
             x_hot, y_hot = info[1], info[2]
             win32gui.DeleteObject(info[3])
             if info[4]:
                 win32gui.DeleteObject(info[4])
-            # El cursor de texto I-Beam casi siempre tiene hotspot central
             if 6 <= x_hot <= 10 and 8 <= y_hot <= 14:
                 return 'ibeam'
     except Exception:
@@ -177,8 +173,6 @@ def capture_screen():
     return cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
 
 def handle_input(conn):
-    global current_mode
-    print("[INPUT] Cliente de control conectado.")
     buffer = ""
     screen_w, screen_h = get_screen_size()
     try:
@@ -223,12 +217,6 @@ def handle_input(conn):
                         dy = event.get('dy', 0)
                         mouse.scroll(0, dy)
 
-                    elif ev_type == 'set_mode':
-                        mode = event.get('mode', 2)
-                        if mode in QUALITY_PRESETS:
-                            current_mode = mode
-                            print(f"[AJUSTE] Modo de calidad cambiado a: {current_mode}")
-
                     elif ev_type == 'key_down':
                         key_str = event.get('key', '').lower()
                         char = event.get('char')
@@ -253,8 +241,8 @@ def handle_input(conn):
 
                 except Exception:
                     pass
-    except Exception as e:
-        print(f"[INPUT] Conexion cerrada: {e}")
+    except Exception:
+        pass
     finally:
         conn.close()
 
@@ -264,11 +252,9 @@ def video_server():
     server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1024 * 1024)
     server_socket.bind(('0.0.0.0', PORT_VIDEO))
     server_socket.listen(1)
-    print(f"[VIDEO] Servidor de video escuchando en el puerto {PORT_VIDEO}...")
 
     while True:
         conn, addr = server_socket.accept()
-        print(f"[VIDEO] Cliente conectado desde {addr}")
         conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
 
         try:
@@ -305,20 +291,18 @@ def video_server():
                     last_cursor_code = cur_code
                     last_sent_time = now
 
-                    encode_params = QUALITY_PRESETS.get(current_mode, QUALITY_PRESETS[2])
-                    _, enc_img = cv2.imencode('.jpg', frame, encode_params)
+                    _, enc_img = cv2.imencode('.jpg', frame, ENCODE_PARAMS)
                     data = enc_img.tobytes()
 
-                    # Cabecera de 5 bytes: 4 bytes tamaño + 1 byte codigo del cursor en vivo
                     hdr = struct.pack('>IB', len(data), cur_code)
                     conn.sendall(hdr + data)
                 else:
                     time.sleep(0.004)
 
         except (BrokenPipeError, ConnectionResetError):
-            print("[VIDEO] Cliente desconectado.")
-        except Exception as e:
-            print(f"[VIDEO] Error: {e}")
+            pass
+        except Exception:
+            pass
         finally:
             conn.close()
 
@@ -328,28 +312,47 @@ def input_server():
     input_sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
     input_sock.bind(('0.0.0.0', PORT_INPUT))
     input_sock.listen(1)
-    print(f"[INPUT] Servidor de control escuchando en el puerto {PORT_INPUT}...")
 
     while True:
         conn, addr = input_sock.accept()
         handle_input(conn)
 
+def discovery_broadcaster(ip):
+    # Emite presencia en la red local para que el cliente detecte la IP automáticamente
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+    msg = json.dumps({"app": "remote_lan_desk", "ip": ip}).encode('utf-8')
+    while True:
+        try:
+            sock.sendto(msg, ('<broadcast>', PORT_DISCOVERY))
+        except Exception:
+            pass
+        time.sleep(1.0)
+
+def show_startup_notification(ip):
+    # Aviso informativo sin terminal que no interrumpe y se cierra al aceptar
+    try:
+        msg = f"Servidor de Control Remoto iniciado en segundo plano.\n\nIP de esta PC: {ip}\n\nPara detener el servicio cuando termines, ejecuta 'DETENER_SERVIDOR.bat'."
+        ctypes.windll.user32.MessageBoxW(0, msg, "Control Remoto LAN - Activo", 0x40 | 0x10000)
+    except Exception:
+        pass
+
 def main():
     ip = get_local_ip()
-    w, h = get_screen_size()
-    print("=" * 65)
-    print("    SERVIDOR DE CONTROL REMOTO LAN - CURSORES DINAMICOS EN VIVO    ")
-    print("=" * 65)
-    print(f">> Resolucion nativa: {w}x{h}")
-    print(f">> Cursores sincronizados: Texto (I-Beam), Enlaces (Hand), Resize")
-    print(f">> Modos de calidad: [1] Rapido | [2] Equilibrado | [3] Ultra HD")
-    print(f">> TU DIRECCION IP LOCAL: {ip}\n")
-    print("Esperando conexion del cliente...")
-    print("=" * 65)
 
+    # Iniciar hilo de auto-deteccion en la red LAN
+    t_disc = threading.Thread(target=discovery_broadcaster, args=(ip,), daemon=True)
+    t_disc.start()
+
+    # Iniciar servidor de input
     t_input = threading.Thread(target=input_server, daemon=True)
     t_input.start()
 
+    # Notificacion nativa de inicio (hilo separado para no bloquear)
+    t_notify = threading.Thread(target=show_startup_notification, args=(ip,), daemon=True)
+    t_notify.start()
+
+    # Servidor de video en bucle principal
     video_server()
 
 if __name__ == '__main__':

@@ -1,38 +1,30 @@
-# Control Remoto Espejo LAN (Alto Rendimiento)
+# Control Remoto Espejo LAN
 
-Sistema de control remoto optimizado para **red local LAN (Wi-Fi o cable Ethernet)** con respuesta inmediata, cero servidores en la nube y máxima fidelidad de imagen.
-
----
-
-### Principales Optimizaciones de Rendimiento
-1. **Detección Dinámica de Cambios (Strided Frame Diff):**  
-   Solo comprime y envía datos cuando la pantalla cambia o el cursor se mueve. Si estás leyendo o la pantalla está estática, reduce el consumo de red y procesador a casi 0%.
-2. **Hilo de Red Desacoplado (Asíncrono):**  
-   La recepción de video y los eventos del teclado/ratón corren en hilos independientes, eliminando congelamientos o retrasos acumulados (*buffer bloat*).
-3. **Control de Ratón a 100 Hz:**  
-   Frecuencia de respuesta instantánea sin saturar los paquetes TCP.
-4. **Instancia Persistente de Captura:**  
-   Ahorra entre 10 y 15 ms por cada fotograma.
+Sistema de control remoto directo **PC a PC por red local (LAN)**, diseñado para ser rápido, discreto y sin complicaciones.
 
 ---
 
-### Controles y Atajos en Vivo (En la PC Controladora)
+### Novedades y Características
 
-Puedes cambiar la calidad al vuelo presionando las teclas de tu teclado:
-- **`Tecla 1` (Modo Rápido):** Calidad optimizada para menor consumo o si el Wi-Fi tiene poca señal.
-- **`Tecla 2` (Modo Equilibrado - Por defecto):** Excelente calidad (85%) y máxima fluidez. Muy recomendado.
-- **`Tecla 3` (Modo Ultra HD):** Máxima fidelidad de imagen (92% Chroma 4:4:4) para texto ultra nítido.
-- **`F11`:** Alternar pantalla completa.
-- **`F10`:** Forzar tamaño de pantalla nativo 1:1.
+1. **Sin terminal en la barra de tareas (PC a manipular):**  
+   Al iniciar el servidor, se ejecuta completamente en segundo plano mediante `pythonw.exe`. No deja ninguna ventana negra de consola ni icono en la barra de tareas.
+2. **Modo Único Equilibrado:**  
+   Se eliminó la selección de múltiples modos. El sistema opera en un único perfil optimizado que combina alta velocidad a 60 FPS con nitidez de texto sin sobrecargar el procesador ni la red.
+3. **Detección Automática de IP:**  
+   Al abrir el cliente, buscará la PC en la red local automáticamente; solo presionas **Enter** para conectarte sin tener que escribir los números a mano.
+4. **Sincronización Dinámica de Cursores:**  
+   El ratón cambia automáticamente a la barra de texto (**I-Beam**) en cuadros de entrada, a la mano (**Hand**) en enlaces y a las flechas de redimensionar (**Resize**) en los bordes.
 
 ---
 
 ### Instrucciones de Uso
 
-1. **En la PC a MANIPULAR (Servidor):**
-   - Ejecuta `INICIAR_SERVIDOR.bat`.
-   - Te mostrará la dirección IP local en pantalla.
+#### En la PC a manipular (Servidor):
+- Haz doble clic en **`INICIAR_SERVIDOR.bat`**.  
+  *(Aparecerá un aviso breve con la IP para tu información y luego se ejecutará silenciosamente en segundo plano, sin estorbar en la barra de tareas).*
+- Para detener el servicio cuando termines, haz doble clic en **`DETENER_SERVIDOR.bat`**.
 
-2. **En tu PC (Cliente):**
-   - Ejecuta `INICIAR_CLIENTE.bat`.
-   - Escribe la IP de la otra PC y presiona Enter.
+#### En tu PC (Cliente):
+- Haz doble clic en **`INICIAR_CLIENTE.bat`**.  
+- Detectará la otra computadora en la red; presiona **Enter** para conectar.
+- Presiona **`F11`** para activar/desactivar la pantalla completa.
