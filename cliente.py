@@ -4,10 +4,19 @@ import json
 import threading
 import sys
 import os
+import ctypes
 import cv2
 import numpy as np
 
-# Desactivar mensaje de bienvenida de pygame
+# Activar DPI Awareness en el cliente para evitar que Windows desenfoque la ventana
+try:
+    ctypes.windll.shcore.SetProcessDpiAwareness(2)
+except Exception:
+    try:
+        ctypes.windll.user32.SetProcessDPIAware()
+    except Exception:
+        pass
+
 os.environ['PYGAME_HIDE_SUPPORT_PROMPT'] = "1"
 import pygame
 
@@ -24,9 +33,9 @@ def recv_all(sock, size):
     return bytes(buf)
 
 def main():
-    print("=" * 60)
-    print("       CLIENTE DE CONTROL REMOTO LAN (PC CONTROLADORA)        ")
-    print("=" * 60)
+    print("=" * 65)
+    print("       CLIENTE DE CONTROL REMOTO LAN - ALTA DEFINICION        ")
+    print("=" * 65)
 
     if len(sys.argv) > 1:
         server_ip = sys.argv[1].strip()
@@ -64,12 +73,22 @@ def main():
     native_w, native_h = info['width'], info['height']
 
     pygame.init()
-    # Iniciar ventana con tamaño proporcional (ej. 80% de la pantalla o 1280x720 base)
-    win_w = min(1366, int(native_w * 0.85))
-    win_h = int(win_w * (native_h / native_w))
+
+    # Obtener resolucion de la pantalla local
+    local_info = pygame.display.Info()
+    local_w, local_h = local_info.current_w, local_info.current_h
+
+    # Si la pantalla local es igual o mayor, abrir 1:1 para nitidez absoluta
+    if local_w >= native_w and local_h >= native_h:
+        win_w, win_h = native_w, native_h
+    else:
+        # Adaptar manteniendo proporcion sin recortar
+        scale_factor = min((local_w - 60) / native_w, (local_h - 80) / native_h, 1.0)
+        win_w = int(native_w * scale_factor)
+        win_h = int(native_h * scale_factor)
 
     screen = pygame.display.set_mode((win_w, win_h), pygame.RESIZABLE)
-    pygame.display.set_caption(f"Control Remoto LAN - Conectado a {server_ip} (F11: Pantalla Completa)")
+    pygame.display.set_caption(f"Control Remoto HD - {server_ip} (F11: Pantalla Completa | F10: 1:1)")
     clock = pygame.time.Clock()
 
     fullscreen = False
@@ -84,7 +103,6 @@ def main():
     running = True
 
     while running:
-        # 1. Procesar eventos de pygame (mouse y teclado)
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 running = False
@@ -102,9 +120,13 @@ def main():
                         screen = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
                         win_w, win_h = screen.get_size()
                     else:
-                        win_w = min(1366, int(native_w * 0.85))
+                        win_w = min(local_w - 60, native_w)
                         win_h = int(win_w * (native_h / native_w))
                         screen = pygame.display.set_mode((win_w, win_h), pygame.RESIZABLE)
+                elif event.key == pygame.K_F10:
+                    # Alternar a resolución nativa 1:1
+                    win_w, win_h = native_w, native_h
+                    screen = pygame.display.set_mode((win_w, win_h), pygame.RESIZABLE)
                 else:
                     kname = pygame.key.name(event.key)
                     char = event.unicode if event.unicode else None
@@ -124,16 +146,16 @@ def main():
             elif event.type == pygame.MOUSEBUTTONDOWN:
                 if event.button in (1, 2, 3):
                     send_event({"type": "mouse_down", "button": event.button})
-                elif event.button == 4:  # Rueda arriba
+                elif event.button == 4:
                     send_event({"type": "mouse_scroll", "dy": 3})
-                elif event.button == 5:  # Rueda abajo
+                elif event.button == 5:
                     send_event({"type": "mouse_scroll", "dy": -3})
 
             elif event.type == pygame.MOUSEBUTTONUP:
                 if event.button in (1, 2, 3):
                     send_event({"type": "mouse_up", "button": event.button})
 
-        # 2. Recibir frame de video
+        # Recibir frame de video
         size_bytes = recv_all(video_sock, 4)
         if not size_bytes:
             print("El servidor cerro la conexion.")
@@ -150,8 +172,15 @@ def main():
         if frame_bgr is not None:
             frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
             img_surf = pygame.image.frombuffer(frame_rgb.tobytes(), (native_w, native_h), 'RGB')
-            scaled_surf = pygame.transform.scale(img_surf, (win_w, win_h))
-            screen.blit(scaled_surf, (0, 0))
+
+            # Si el tamaño coincide exactamente, no reescalar (100% nitidez nativa)
+            if win_w == native_w and win_h == native_h:
+                screen.blit(img_surf, (0, 0))
+            else:
+                # Usar smoothscale para suavizado de alta calidad sin pixelado
+                scaled_surf = pygame.transform.smoothscale(img_surf, (win_w, win_h))
+                screen.blit(scaled_surf, (0, 0))
+
             pygame.display.flip()
 
         clock.tick(60)

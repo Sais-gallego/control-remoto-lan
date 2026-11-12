@@ -4,8 +4,18 @@ import struct
 import json
 import time
 import sys
+import ctypes
 import numpy as np
 import cv2
+
+# Activar DPI Awareness para capturar la resolucion nativa real (100% nitida)
+try:
+    ctypes.windll.shcore.SetProcessDpiAwareness(2)
+except Exception:
+    try:
+        ctypes.windll.user32.SetProcessDPIAware()
+    except Exception:
+        pass
 
 try:
     import mss
@@ -22,6 +32,9 @@ PORT_INPUT = 5556
 
 mouse = MouseController()
 keyboard = KeyboardController()
+
+# Calidad ultra alta para red local: 92% con muestreo de color 4:4:4 (sin perdida en texto)
+JPEG_QUALITY = 92
 
 KEY_MAP = {
     'enter': Key.enter,
@@ -69,6 +82,10 @@ def get_local_ip():
         s.close()
     return ip
 
+def get_screen_size():
+    user32 = ctypes.windll.user32
+    return user32.GetSystemMetrics(0), user32.GetSystemMetrics(1)
+
 def capture_screen():
     if HAS_MSS:
         try:
@@ -78,14 +95,30 @@ def capture_screen():
                 return img[:, :, :3]
         except Exception:
             pass
-    # Fallback to ImageGrab
-    pil_img = ImageGrab.grab()
+    # Fallback ImageGrab
+    pil_img = ImageGrab.grab(all_screens=False)
     frame = np.array(pil_img)
     return cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+
+def draw_cursor(frame):
+    # Dibuja el cursor del raton para que el cliente vea exactamente donde apunta
+    try:
+        cx, cy = mouse.position
+        h, w = frame.shape[:2]
+        if 0 <= cx < w and 0 <= cy < h:
+            # Flecha del cursor limpia y estilizada
+            pts = np.array([[cx, cy], [cx, cy + 18], [cx + 5, cy + 14], [cx + 10, cy + 22],
+                            [cx + 13, cy + 20], [cx + 8, cy + 12], [cx + 14, cy + 12]], np.int32)
+            cv2.fillPoly(frame, [pts], (255, 255, 255))
+            cv2.polylines(frame, [pts], True, (0, 0, 0), 1, cv2.LINE_AA)
+    except Exception:
+        pass
+    return frame
 
 def handle_input(conn):
     print("[INPUT] Cliente de control conectado.")
     buffer = ""
+    screen_w, screen_h = get_screen_size()
     try:
         while True:
             data = conn.recv(4096)
@@ -102,7 +135,6 @@ def handle_input(conn):
 
                     if ev_type == 'mouse_move':
                         nx, ny = event['x'], event['y']
-                        screen_w, screen_h = ImageGrab.grab().size
                         target_x = int(nx * screen_w)
                         target_y = int(ny * screen_h)
                         mouse.position = (target_x, target_y)
@@ -151,11 +183,10 @@ def handle_input(conn):
                             except Exception:
                                 pass
 
-                except Exception as e:
-                    # Ignorar eventos corruptos
+                except Exception:
                     pass
     except Exception as e:
-        print(f"[INPUT] Conexión cerrada: {e}")
+        print(f"[INPUT] Conexion cerrada: {e}")
     finally:
         conn.close()
 
@@ -166,13 +197,19 @@ def video_server():
     server_socket.listen(1)
     print(f"[VIDEO] Servidor de video escuchando en el puerto {PORT_VIDEO}...")
 
+    # Parametros de compresion de alta fidelidad:
+    # IMWRITE_JPEG_SAMPLING_FACTOR_444 evita que las letras se vean borrosas
+    encode_params = [
+        cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY,
+        cv2.IMWRITE_JPEG_SAMPLING_FACTOR, cv2.IMWRITE_JPEG_SAMPLING_FACTOR_444
+    ]
+
     while True:
         conn, addr = server_socket.accept()
         print(f"[VIDEO] Cliente conectado desde {addr}")
         conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
 
         try:
-            # Enviar primero resolución nativa
             init_img = capture_screen()
             h, w = init_img.shape[:2]
             header = json.dumps({"width": w, "height": h}).encode('utf-8')
@@ -180,12 +217,11 @@ def video_server():
 
             while True:
                 frame = capture_screen()
-                # Codificar JPEG a calidad 75 para máxima velocidad y nitidez
-                _, enc_img = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
+                frame = draw_cursor(frame)
+
+                _, enc_img = cv2.imencode('.jpg', frame, encode_params)
                 data = enc_img.tobytes()
-                # Enviar tamaño (4 bytes) + datos
                 conn.sendall(struct.pack('>I', len(data)) + data)
-                # Pequeña pausa para no saturar CPU a 60 FPS (~16ms)
                 time.sleep(0.016)
         except (BrokenPipeError, ConnectionResetError):
             print("[VIDEO] Cliente desconectado.")
@@ -207,20 +243,19 @@ def input_server():
 
 def main():
     ip = get_local_ip()
-    print("=" * 60)
-    print("       SERVIDOR DE CONTROL REMOTO LAN (PC A MANIPULAR)       ")
-    print("=" * 60)
-    print(f"\n>> TU DIRECCION IP LOCAL ES: {ip}")
-    print(f">> Escribe esta IP en la otra computadora para conectar.\n")
+    w, h = get_screen_size()
+    print("=" * 65)
+    print("       SERVIDOR DE CONTROL REMOTO LAN - ALTA DEFINICION        ")
+    print("=" * 65)
+    print(f">> Resolucion detectada: {w}x{h} (100% nativa con DPI Aware)")
+    print(f">> Calidad de video: {JPEG_QUALITY}% (Chroma 4:4:4 sin distorsion)")
+    print(f">> TU DIRECCION IP LOCAL: {ip}\n")
     print("Esperando conexion del cliente...")
-    print("Presiona Ctrl + C en esta consola para detener.\n")
-    print("=" * 60)
+    print("=" * 65)
 
-    # Iniciar servidor de input en un hilo
     t_input = threading.Thread(target=input_server, daemon=True)
     t_input.start()
 
-    # Servidor de video en el hilo principal
     video_server()
 
 if __name__ == '__main__':
