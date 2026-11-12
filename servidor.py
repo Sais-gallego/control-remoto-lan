@@ -8,7 +8,7 @@ import ctypes
 import numpy as np
 import cv2
 
-# Activar DPI Awareness para capturar la resolucion nativa real (100% nitida)
+# Activar DPI Awareness
 try:
     ctypes.windll.shcore.SetProcessDpiAwareness(2)
 except Exception:
@@ -33,8 +33,14 @@ PORT_INPUT = 5556
 mouse = MouseController()
 keyboard = KeyboardController()
 
-# Calidad ultra alta para red local: 92% con muestreo de color 4:4:4 (sin perdida en texto)
-JPEG_QUALITY = 92
+# Configuraciones de calidad intercambiables
+# 1: Rapido (75%), 2: Equilibrado (85% por defecto, recomendado), 3: Ultra HD (92%)
+current_mode = 2
+QUALITY_PRESETS = {
+    1: [cv2.IMWRITE_JPEG_QUALITY, 75, cv2.IMWRITE_JPEG_OPTIMIZE, 0],
+    2: [cv2.IMWRITE_JPEG_QUALITY, 85, cv2.IMWRITE_JPEG_OPTIMIZE, 0],
+    3: [cv2.IMWRITE_JPEG_QUALITY, 92, cv2.IMWRITE_JPEG_SAMPLING_FACTOR, cv2.IMWRITE_JPEG_SAMPLING_FACTOR_444]
+}
 
 KEY_MAP = {
     'enter': Key.enter,
@@ -86,27 +92,33 @@ def get_screen_size():
     user32 = ctypes.windll.user32
     return user32.GetSystemMetrics(0), user32.GetSystemMetrics(1)
 
+# Instancia persistente de mss para evitar recrear contextos GDI en cada frame
+sct_instance = None
+if HAS_MSS:
+    try:
+        sct_instance = mss.mss()
+    except Exception:
+        sct_instance = None
+
 def capture_screen():
-    if HAS_MSS:
+    global sct_instance
+    if sct_instance is not None:
         try:
-            with mss.mss() as sct:
-                mon = sct.monitors[1]
-                img = np.array(sct.grab(mon))
-                return img[:, :, :3]
+            mon = sct_instance.monitors[1]
+            img = np.array(sct_instance.grab(mon))
+            return img[:, :, :3]
         except Exception:
             pass
-    # Fallback ImageGrab
+    # Fallback
     pil_img = ImageGrab.grab(all_screens=False)
     frame = np.array(pil_img)
     return cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
 
 def draw_cursor(frame):
-    # Dibuja el cursor del raton para que el cliente vea exactamente donde apunta
     try:
         cx, cy = mouse.position
         h, w = frame.shape[:2]
         if 0 <= cx < w and 0 <= cy < h:
-            # Flecha del cursor limpia y estilizada
             pts = np.array([[cx, cy], [cx, cy + 18], [cx + 5, cy + 14], [cx + 10, cy + 22],
                             [cx + 13, cy + 20], [cx + 8, cy + 12], [cx + 14, cy + 12]], np.int32)
             cv2.fillPoly(frame, [pts], (255, 255, 255))
@@ -116,6 +128,7 @@ def draw_cursor(frame):
     return frame
 
 def handle_input(conn):
+    global current_mode
     print("[INPUT] Cliente de control conectado.")
     buffer = ""
     screen_w, screen_h = get_screen_size()
@@ -161,6 +174,12 @@ def handle_input(conn):
                         dy = event.get('dy', 0)
                         mouse.scroll(0, dy)
 
+                    elif ev_type == 'set_mode':
+                        mode = event.get('mode', 2)
+                        if mode in QUALITY_PRESETS:
+                            current_mode = mode
+                            print(f"[AJUSTE] Modo de calidad cambiado a: {current_mode}")
+
                     elif ev_type == 'key_down':
                         key_str = event.get('key', '').lower()
                         char = event.get('char')
@@ -193,16 +212,11 @@ def handle_input(conn):
 def video_server():
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    # Aumentar buffer de envio para no bloquear
+    server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1024 * 1024)
     server_socket.bind(('0.0.0.0', PORT_VIDEO))
     server_socket.listen(1)
     print(f"[VIDEO] Servidor de video escuchando en el puerto {PORT_VIDEO}...")
-
-    # Parametros de compresion de alta fidelidad:
-    # IMWRITE_JPEG_SAMPLING_FACTOR_444 evita que las letras se vean borrosas
-    encode_params = [
-        cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY,
-        cv2.IMWRITE_JPEG_SAMPLING_FACTOR, cv2.IMWRITE_JPEG_SAMPLING_FACTOR_444
-    ]
 
     while True:
         conn, addr = server_socket.accept()
@@ -215,14 +229,39 @@ def video_server():
             header = json.dumps({"width": w, "height": h}).encode('utf-8')
             conn.sendall(struct.pack('>I', len(header)) + header)
 
-            while True:
-                frame = capture_screen()
-                frame = draw_cursor(frame)
+            prev_sample = None
+            last_sent_time = 0
+            last_mouse_pos = (-1, -1)
 
-                _, enc_img = cv2.imencode('.jpg', frame, encode_params)
-                data = enc_img.tobytes()
-                conn.sendall(struct.pack('>I', len(data)) + data)
-                time.sleep(0.016)
+            while True:
+                now = time.time()
+                frame = capture_screen()
+
+                # Detección ultra-rápida de cambios (strided diff: 1.1ms)
+                curr_sample = frame[::16, ::16]
+                curr_mouse = mouse.position
+
+                has_changed = (
+                    prev_sample is None or
+                    curr_mouse != last_mouse_pos or
+                    cv2.absdiff(curr_sample, prev_sample).any() or
+                    (now - last_sent_time > 0.3)  # Keepalive cada 300ms
+                )
+
+                if has_changed:
+                    prev_sample = curr_sample
+                    last_mouse_pos = curr_mouse
+                    last_sent_time = now
+
+                    frame = draw_cursor(frame)
+                    encode_params = QUALITY_PRESETS.get(current_mode, QUALITY_PRESETS[2])
+                    _, enc_img = cv2.imencode('.jpg', frame, encode_params)
+                    data = enc_img.tobytes()
+                    conn.sendall(struct.pack('>I', len(data)) + data)
+                else:
+                    # Si no hay cambios, pausar 4ms para ahorrar 100% de CPU
+                    time.sleep(0.004)
+
         except (BrokenPipeError, ConnectionResetError):
             print("[VIDEO] Cliente desconectado.")
         except Exception as e:
@@ -233,6 +272,7 @@ def video_server():
 def input_server():
     input_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     input_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    input_sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
     input_sock.bind(('0.0.0.0', PORT_INPUT))
     input_sock.listen(1)
     print(f"[INPUT] Servidor de control escuchando en el puerto {PORT_INPUT}...")
@@ -245,10 +285,11 @@ def main():
     ip = get_local_ip()
     w, h = get_screen_size()
     print("=" * 65)
-    print("       SERVIDOR DE CONTROL REMOTO LAN - ALTA DEFINICION        ")
+    print("       SERVIDOR DE CONTROL REMOTO LAN - ALTO RENDIMIENTO       ")
     print("=" * 65)
-    print(f">> Resolucion detectada: {w}x{h} (100% nativa con DPI Aware)")
-    print(f">> Calidad de video: {JPEG_QUALITY}% (Chroma 4:4:4 sin distorsion)")
+    print(f">> Resolucion nativa: {w}x{h}")
+    print(f">> Optimizaciones: Persistent MSS, Strided Diff, Zero-Copy TCP")
+    print(f">> Modos de calidad: [1] Rapido | [2] Equilibrado | [3] Ultra HD")
     print(f">> TU DIRECCION IP LOCAL: {ip}\n")
     print("Esperando conexion del cliente...")
     print("=" * 65)

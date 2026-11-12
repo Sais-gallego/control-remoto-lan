@@ -2,13 +2,13 @@ import socket
 import struct
 import json
 import threading
+import time
 import sys
 import os
 import ctypes
 import cv2
 import numpy as np
 
-# Activar DPI Awareness en el cliente para evitar que Windows desenfoque la ventana
 try:
     ctypes.windll.shcore.SetProcessDpiAwareness(2)
 except Exception:
@@ -34,7 +34,7 @@ def recv_all(sock, size):
 
 def main():
     print("=" * 65)
-    print("       CLIENTE DE CONTROL REMOTO LAN - ALTA DEFINICION        ")
+    print("       CLIENTE DE CONTROL REMOTO LAN - ALTO RENDIMIENTO       ")
     print("=" * 65)
 
     if len(sys.argv) > 1:
@@ -50,13 +50,14 @@ def main():
 
     try:
         video_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        video_sock.connect((server_ip, PORT_VIDEO))
         video_sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        video_sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024 * 1024)
+        video_sock.connect((server_ip, PORT_VIDEO))
 
         input_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        input_sock.connect((server_ip, PORT_INPUT))
         input_sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-        print("¡Conexion establecida con exito!")
+        input_sock.connect((server_ip, PORT_INPUT))
+        print("¡Conexion de alta velocidad establecida!")
     except Exception as e:
         print(f"Error al conectar con la PC destino: {e}")
         input("Presiona Enter para salir...")
@@ -74,24 +75,34 @@ def main():
 
     pygame.init()
 
-    # Obtener resolucion de la pantalla local
     local_info = pygame.display.Info()
     local_w, local_h = local_info.current_w, local_info.current_h
 
-    # Si la pantalla local es igual o mayor, abrir 1:1 para nitidez absoluta
     if local_w >= native_w and local_h >= native_h:
         win_w, win_h = native_w, native_h
     else:
-        # Adaptar manteniendo proporcion sin recortar
         scale_factor = min((local_w - 60) / native_w, (local_h - 80) / native_h, 1.0)
         win_w = int(native_w * scale_factor)
         win_h = int(native_h * scale_factor)
 
     screen = pygame.display.set_mode((win_w, win_h), pygame.RESIZABLE)
-    pygame.display.set_caption(f"Control Remoto HD - {server_ip} (F11: Pantalla Completa | F10: 1:1)")
     clock = pygame.time.Clock()
 
     fullscreen = False
+    current_mode = 2
+    mode_names = {1: "Rapido (Baja Latencia)", 2: "Equilibrado (Recomendado)", 3: "Ultra HD"}
+
+    def update_title(fps=60):
+        pygame.display.set_caption(
+            f"Control Remoto LAN | {fps} FPS | Modo: {mode_names.get(current_mode)} | Teclas: [1/2/3] Calidad - [F11] Pantalla Completa"
+        )
+
+    update_title()
+
+    # Estado compartido entre hilos
+    frame_lock = threading.Lock()
+    latest_surface = None
+    running = True
 
     def send_event(ev_dict):
         try:
@@ -100,9 +111,40 @@ def main():
         except Exception:
             pass
 
-    running = True
+    # Hilo desacoplado para recibir y decodificar video continuamente sin trabar la interfaz
+    def video_receiver_loop():
+        nonlocal latest_surface, running
+        while running:
+            try:
+                size_bytes = recv_all(video_sock, 4)
+                if not size_bytes:
+                    break
+                frame_size = struct.unpack('>I', size_bytes)[0]
+                frame_data = recv_all(video_sock, frame_size)
+                if not frame_data:
+                    break
+
+                img_np = np.frombuffer(frame_data, dtype=np.uint8)
+                frame_bgr = cv2.imdecode(img_np, cv2.IMREAD_COLOR)
+
+                if frame_bgr is not None:
+                    frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+                    surf = pygame.image.frombuffer(frame_rgb.tobytes(), (native_w, native_h), 'RGB')
+                    with frame_lock:
+                        latest_surface = surf
+            except Exception:
+                break
+        running = False
+
+    t_recv = threading.Thread(target=video_receiver_loop, daemon=True)
+    t_recv.start()
+
+    last_mouse_send = 0
+    title_timer = 0
 
     while running:
+        now = time.time()
+
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 running = False
@@ -124,9 +166,20 @@ def main():
                         win_h = int(win_w * (native_h / native_w))
                         screen = pygame.display.set_mode((win_w, win_h), pygame.RESIZABLE)
                 elif event.key == pygame.K_F10:
-                    # Alternar a resolución nativa 1:1
                     win_w, win_h = native_w, native_h
                     screen = pygame.display.set_mode((win_w, win_h), pygame.RESIZABLE)
+                elif event.key in (pygame.K_1, pygame.K_KP1):
+                    current_mode = 1
+                    send_event({"type": "set_mode", "mode": 1})
+                    update_title(int(clock.get_fps()))
+                elif event.key in (pygame.K_2, pygame.K_KP2):
+                    current_mode = 2
+                    send_event({"type": "set_mode", "mode": 2})
+                    update_title(int(clock.get_fps()))
+                elif event.key in (pygame.K_3, pygame.K_KP3):
+                    current_mode = 3
+                    send_event({"type": "set_mode", "mode": 3})
+                    update_title(int(clock.get_fps()))
                 else:
                     kname = pygame.key.name(event.key)
                     char = event.unicode if event.unicode else None
@@ -138,10 +191,13 @@ def main():
                 send_event({"type": "key_up", "key": kname, "char": char})
 
             elif event.type == pygame.MOUSEMOTION:
-                mx, my = event.pos
-                nx = max(0.0, min(1.0, mx / win_w))
-                ny = max(0.0, min(1.0, my / win_h))
-                send_event({"type": "mouse_move", "x": nx, "y": ny})
+                # Limitar envio de movimiento a maximo 100Hz (cada 10ms) para evitar congestión
+                if now - last_mouse_send >= 0.010:
+                    mx, my = event.pos
+                    nx = max(0.0, min(1.0, mx / win_w))
+                    ny = max(0.0, min(1.0, my / win_h))
+                    send_event({"type": "mouse_move", "x": nx, "y": ny})
+                    last_mouse_send = now
 
             elif event.type == pygame.MOUSEBUTTONDOWN:
                 if event.button in (1, 2, 3):
@@ -155,35 +211,26 @@ def main():
                 if event.button in (1, 2, 3):
                     send_event({"type": "mouse_up", "button": event.button})
 
-        # Recibir frame de video
-        size_bytes = recv_all(video_sock, 4)
-        if not size_bytes:
-            print("El servidor cerro la conexion.")
-            break
-        frame_size = struct.unpack('>I', size_bytes)[0]
-        frame_data = recv_all(video_sock, frame_size)
-        if not frame_data:
-            break
+        # Dibujar frame mas reciente
+        surf_to_draw = None
+        with frame_lock:
+            if latest_surface is not None:
+                surf_to_draw = latest_surface
 
-        # Decodificar JPEG
-        img_np = np.frombuffer(frame_data, dtype=np.uint8)
-        frame_bgr = cv2.imdecode(img_np, cv2.IMREAD_COLOR)
-
-        if frame_bgr is not None:
-            frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-            img_surf = pygame.image.frombuffer(frame_rgb.tobytes(), (native_w, native_h), 'RGB')
-
-            # Si el tamaño coincide exactamente, no reescalar (100% nitidez nativa)
+        if surf_to_draw is not None:
             if win_w == native_w and win_h == native_h:
-                screen.blit(img_surf, (0, 0))
+                screen.blit(surf_to_draw, (0, 0))
             else:
-                # Usar smoothscale para suavizado de alta calidad sin pixelado
-                scaled_surf = pygame.transform.smoothscale(img_surf, (win_w, win_h))
-                screen.blit(scaled_surf, (0, 0))
-
+                scaled = pygame.transform.smoothscale(surf_to_draw, (win_w, win_h))
+                screen.blit(scaled, (0, 0))
             pygame.display.flip()
 
         clock.tick(60)
+
+        # Actualizar indicador de FPS cada segundo
+        if now - title_timer >= 1.0:
+            update_title(int(clock.get_fps()))
+            title_timer = now
 
     video_sock.close()
     input_sock.close()
