@@ -17,12 +17,19 @@ except Exception:
     except Exception:
         pass
 
+try:
+    import pyaudiowpatch as pyaudio
+    HAS_AUDIO = True
+except ImportError:
+    HAS_AUDIO = False
+
 os.environ['PYGAME_HIDE_SUPPORT_PROMPT'] = "1"
 import pygame
 
 PORT_VIDEO = 5555
 PORT_INPUT = 5556
 PORT_DISCOVERY = 5557
+PORT_AUDIO = 5558
 
 def recv_all(sock, size):
     buf = bytearray()
@@ -50,9 +57,55 @@ def auto_discover_server(timeout=1.2):
         sock.close()
     return detected_ip
 
+def audio_receiver_loop(server_ip, is_running_func, is_muted_func):
+    if not HAS_AUDIO:
+        return
+    try:
+        audio_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        audio_sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        audio_sock.connect((server_ip, PORT_AUDIO))
+
+        hdr_len_bytes = recv_all(audio_sock, 4)
+        if not hdr_len_bytes:
+            return
+        hdr_len = struct.unpack('>I', hdr_len_bytes)[0]
+        hdr_data = recv_all(audio_sock, hdr_len)
+        info = json.loads(hdr_data.decode('utf-8'))
+
+        rate = info.get('rate', 48000)
+        channels = info.get('channels', 2)
+
+        p = pyaudio.PyAudio()
+        stream = p.open(
+            format=pyaudio.paInt16,
+            channels=channels,
+            rate=rate,
+            output=True,
+            frames_per_buffer=1024
+        )
+
+        while is_running_func():
+            sz_bytes = recv_all(audio_sock, 4)
+            if not sz_bytes:
+                break
+            sz = struct.unpack('>I', sz_bytes)[0]
+            audio_data = recv_all(audio_sock, sz)
+            if not audio_data:
+                break
+
+            if not is_muted_func():
+                stream.write(audio_data)
+
+        stream.stop_stream()
+        stream.close()
+        p.terminate()
+        audio_sock.close()
+    except Exception:
+        pass
+
 def main():
     print("=" * 65)
-    print("              CLIENTE DE CONTROL REMOTO LAN                  ")
+    print("       CLIENTE DE CONTROL REMOTO LAN CON AUDIO EN VIVO        ")
     print("=" * 65)
 
     server_ip = None
@@ -83,7 +136,7 @@ def main():
         input_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         input_sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         input_sock.connect((server_ip, PORT_INPUT))
-        print("¡Conexion establecida con exito!")
+        print("¡Conexion de video y control establecida!")
     except Exception as e:
         print(f"Error al conectar con la PC destino: {e}")
         input("Presiona Enter para salir...")
@@ -125,15 +178,24 @@ def main():
         win_h = int(native_h * scale_factor)
 
     screen = pygame.display.set_mode((win_w, win_h), pygame.RESIZABLE)
-    pygame.display.set_caption(f"Control Remoto LAN - {server_ip} (F1: Inicio | F2: Alt+Tab | F3: Ventanas | F11: Completa)")
     clock = pygame.time.Clock()
 
     fullscreen = False
+    is_muted = False
+    running = True
+
+    def update_window_title():
+        audio_status = "MUTED" if is_muted else "ACTIVO"
+        pygame.display.set_caption(
+            f"Control Remoto LAN - {server_ip} | Audio: {audio_status} (M: Silenciar) | F11: Completa"
+        )
+
+    update_window_title()
+
     frame_lock = threading.Lock()
     latest_surface = None
     latest_cursor_code = 0
     active_cursor_code = -1
-    running = True
 
     def send_event(ev_dict):
         try:
@@ -170,6 +232,14 @@ def main():
     t_recv = threading.Thread(target=video_receiver_loop, daemon=True)
     t_recv.start()
 
+    # Iniciar recepción y reproducción de audio remoto en tiempo real
+    t_audio = threading.Thread(
+        target=audio_receiver_loop,
+        args=(server_ip, lambda: running, lambda: is_muted),
+        daemon=True
+    )
+    t_audio.start()
+
     last_mouse_send = 0
 
     while running:
@@ -198,7 +268,10 @@ def main():
                 elif event.key == pygame.K_F10:
                     win_w, win_h = native_w, native_h
                     screen = pygame.display.set_mode((win_w, win_h), pygame.RESIZABLE)
-                # Atajos especiales de Windows para manipular ventanas facilmente:
+                elif event.key == pygame.K_m:
+                    # Alternar silencio del audio remoto
+                    is_muted = not is_muted
+                    update_window_title()
                 elif event.key == pygame.K_F1:
                     send_event({"type": "special_action", "action": "win_key"})
                 elif event.key == pygame.K_F2:
@@ -213,7 +286,7 @@ def main():
                     send_event({"type": "key_down", "key": kname, "char": char})
 
             elif event.type == pygame.KEYUP:
-                if event.key not in (pygame.K_F1, pygame.K_F2, pygame.K_F3, pygame.K_F4, pygame.K_F10, pygame.K_F11):
+                if event.key not in (pygame.K_F1, pygame.K_F2, pygame.K_F3, pygame.K_F4, pygame.K_F10, pygame.K_F11, pygame.K_m):
                     kname = pygame.key.name(event.key)
                     char = event.unicode if event.unicode else None
                     send_event({"type": "key_up", "key": kname, "char": char})

@@ -5,11 +5,9 @@ import json
 import time
 import sys
 import ctypes
-from ctypes import wintypes
 import numpy as np
 import cv2
 
-# Activar DPI Awareness
 try:
     ctypes.windll.shcore.SetProcessDpiAwareness(2)
 except Exception:
@@ -31,6 +29,12 @@ try:
 except ImportError:
     HAS_WIN32 = False
 
+try:
+    import pyaudiowpatch as pyaudio
+    HAS_AUDIO = True
+except ImportError:
+    HAS_AUDIO = False
+
 from PIL import ImageGrab
 from pynput.mouse import Controller as MouseController, Button
 from pynput.keyboard import Controller as KeyboardController, Key
@@ -38,30 +42,29 @@ from pynput.keyboard import Controller as KeyboardController, Key
 PORT_VIDEO = 5555
 PORT_INPUT = 5556
 PORT_DISCOVERY = 5557
+PORT_AUDIO = 5558
 
 user32 = ctypes.windll.user32
 mouse = MouseController()
 keyboard = KeyboardController()
 
-# Constantes de eventos de raton nativos de Windows
 MOUSEEVENTF_MOVE = 0x0001
 MOUSEEVENTF_ABSOLUTE = 0x8000
 
-# Perfil equilibrado de alta fidelidad
 ENCODE_PARAMS = [cv2.IMWRITE_JPEG_QUALITY, 85, cv2.IMWRITE_JPEG_OPTIMIZE, 0]
 
 CURSOR_CODES = {
     'arrow': 0,
-    'ibeam': 1,      # Texto / input / insercion
-    'hand': 2,       # Enlaces / botones
-    'cross': 3,      # Cruz
-    'wait': 4,       # Espera
-    'sizens': 5,     # Redimensionar vertical
-    'sizewe': 6,     # Redimensionar horizontal
-    'sizenwse': 7,   # Redimensionar diagonal 1
-    'sizenesw': 8,   # Redimensionar diagonal 2
-    'sizeall': 9,    # Mover ventana
-    'no': 10         # Prohibido
+    'ibeam': 1,
+    'hand': 2,
+    'cross': 3,
+    'wait': 4,
+    'sizens': 5,
+    'sizewe': 6,
+    'sizenwse': 7,
+    'sizenesw': 8,
+    'sizeall': 9,
+    'no': 10
 }
 
 SYSTEM_CURSORS = {}
@@ -172,13 +175,11 @@ def capture_screen():
             return img[:, :, :3]
         except Exception:
             pass
-    # Capturar incluyendo ventanas translucidas y miniaturas de barra de tareas (include_layered_windows=True)
     pil_img = ImageGrab.grab(all_screens=False, include_layered_windows=True)
     frame = np.array(pil_img)
     return cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
 
 def trigger_special_action(action):
-    # Acciones especiales para navegacion y ventanas
     if action == "win_key":
         keyboard.press(Key.cmd)
         keyboard.release(Key.cmd)
@@ -220,10 +221,7 @@ def handle_input(conn):
                         target_x = int(nx * screen_w)
                         target_y = int(ny * screen_h)
                         
-                        # SetCursorPos directo
                         user32.SetCursorPos(target_x, target_y)
-                        # mouse_event para generar el evento nativo de hover en Windows DWM
-                        # Esto activa las miniaturas y previsualizaciones de ventanas en la barra de tareas
                         norm_x = int(nx * 65535)
                         norm_y = int(ny * 65535)
                         user32.mouse_event(MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_MOVE, norm_x, norm_y, 0, 0)
@@ -309,12 +307,10 @@ def video_server():
                 now = time.time()
                 frame = capture_screen()
 
-                curr_sample = frame[::8, ::8]  # Muestreo a paso 8 para detectar miniaturas flotantes
+                curr_sample = frame[::8, ::8]
                 curr_mouse = mouse.position
                 cur_name = get_active_cursor()
                 cur_code = CURSOR_CODES.get(cur_name, 0)
-
-                # Si el mouse esta sobre la barra de tareas (zona inferior), refrescar con maxima frecuencia
                 is_on_taskbar = (curr_mouse[1] >= (h - 70))
 
                 has_changed = (
@@ -347,6 +343,69 @@ def video_server():
         finally:
             conn.close()
 
+def audio_server():
+    # Transmite el audio del sistema (Meet, videos, llamadas) en tiempo real
+    if not HAS_AUDIO:
+        return
+
+    server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        server_socket.bind(('0.0.0.0', PORT_AUDIO))
+        server_socket.listen(1)
+    except Exception:
+        return
+
+    while True:
+        try:
+            conn, addr = server_socket.accept()
+            conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+
+            p = pyaudio.PyAudio()
+            try:
+                wasapi_info = p.get_host_api_info_by_type(pyaudio.paWASAPI)
+                default_speakers = p.get_device_info_by_index(wasapi_info['defaultOutputDevice'])
+
+                if not default_speakers['isLoopbackDevice']:
+                    for loopback in p.get_loopback_device_info_generator():
+                        if default_speakers['name'] in loopback['name']:
+                            default_speakers = loopback
+                            break
+                    else:
+                        default_speakers = p.get_default_wasapi_loopback()
+
+                sample_rate = int(default_speakers['defaultSampleRate'])
+                channels = min(2, int(default_speakers['maxInputChannels']))
+
+                audio_hdr = json.dumps({"rate": sample_rate, "channels": channels}).encode('utf-8')
+                conn.sendall(struct.pack('>I', len(audio_hdr)) + audio_hdr)
+
+                stream = p.open(
+                    format=pyaudio.paInt16,
+                    channels=channels,
+                    rate=sample_rate,
+                    input=True,
+                    input_device_index=default_speakers['index'],
+                    frames_per_buffer=1024
+                )
+
+                while True:
+                    data = stream.read(1024, exception_on_overflow=False)
+                    conn.sendall(struct.pack('>I', len(data)) + data)
+
+            except Exception:
+                pass
+            finally:
+                try:
+                    stream.stop_stream()
+                    stream.close()
+                except Exception:
+                    pass
+                p.terminate()
+                conn.close()
+        except Exception:
+            pass
+
 def input_server():
     input_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     input_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -371,7 +430,7 @@ def discovery_broadcaster(ip):
 
 def show_startup_notification(ip):
     try:
-        msg = f"Servidor de Control Remoto iniciado en segundo plano.\n\nIP de esta PC: {ip}\n\nPara detener el servicio cuando termines, ejecuta 'DETENER_SERVIDOR.bat'."
+        msg = f"Servidor de Control Remoto iniciado en segundo plano.\n\nIP de esta PC: {ip}\nAudio remoto: Activado\n\nPara detener el servicio cuando termines, ejecuta 'DETENER_SERVIDOR.bat'."
         ctypes.windll.user32.MessageBoxW(0, msg, "Control Remoto LAN - Activo", 0x40 | 0x10000)
     except Exception:
         pass
@@ -384,6 +443,9 @@ def main():
 
     t_input = threading.Thread(target=input_server, daemon=True)
     t_input.start()
+
+    t_audio = threading.Thread(target=audio_server, daemon=True)
+    t_audio.start()
 
     t_notify = threading.Thread(target=show_startup_notification, args=(ip,), daemon=True)
     t_notify.start()
