@@ -7,6 +7,8 @@ import sys
 import os
 import base64
 import ctypes
+import tkinter as tk
+import winsound
 import numpy as np
 import cv2
 
@@ -58,6 +60,7 @@ keyboard = KeyboardController()
 
 MOUSEEVENTF_MOVE = 0x0001
 MOUSEEVENTF_ABSOLUTE = 0x8000
+WDA_EXCLUDEFROMCAPTURE = 0x00000011  # Excluir ventana de Google Meet, Zoom, grabaciones
 
 ENCODE_PARAMS = [cv2.IMWRITE_JPEG_QUALITY, 85, cv2.IMWRITE_JPEG_OPTIMIZE, 0]
 
@@ -211,13 +214,79 @@ def get_desktop_dir():
     desktop = os.path.join(os.path.expanduser('~'), 'Desktop')
     return desktop if os.path.exists(desktop) else os.path.expanduser('~')
 
+def show_stealth_notification(text):
+    """
+    Muestra una notificacion flotante discreta en la pantalla fisica.
+    Gracias a WDA_EXCLUDEFROMCAPTURE, Google Meet, Zoom o grabadores de pantalla
+    NO LA TRANSMITEN (es 100% invisible para los demas en la llamada).
+    """
+    def _run():
+        try:
+            # Campanita suave para llamar la atencion del usuario
+            winsound.MessageBeep(winsound.MB_ICONASTERISK)
+
+            root = tk.Tk()
+            root.withdraw()
+
+            top = tk.Toplevel(root)
+            top.overrideredirect(True)
+            top.attributes('-topmost', True)
+            top.attributes('-alpha', 0.95)
+            top.configure(bg='#181825')
+
+            screen_w = top.winfo_screenwidth()
+            screen_h = top.winfo_screenheight()
+            w, h = 380, 85
+            x = screen_w - w - 25
+            y = screen_h - h - 70
+            top.geometry(f"{w}x{h}+{x}+{y}")
+
+            frame = tk.Frame(top, bg='#181825', padx=14, pady=10)
+            frame.pack(fill='both', expand=True)
+
+            lbl_title = tk.Label(
+                frame,
+                text="💬 Mensaje Privado (Oculto en Meet)",
+                font=("Segoe UI", 9, "bold"),
+                fg="#89b4fa",
+                bg='#181825'
+            )
+            lbl_title.pack(anchor='w')
+
+            lbl_msg = tk.Label(
+                frame,
+                text=text,
+                font=("Segoe UI", 11),
+                fg="#cdd6f4",
+                bg='#181825',
+                wraplength=350,
+                justify='left'
+            )
+            lbl_msg.pack(anchor='w', pady=(4, 0))
+
+            top.update_idletasks()
+            hwnd = user32.GetParent(top.winfo_id()) or top.winfo_id()
+            # Aplicar exclusion de captura para que Meet no lo muestre
+            user32.SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE)
+
+            # Clic para descartar
+            for widget in (top, frame, lbl_title, lbl_msg):
+                widget.bind("<Button-1>", lambda e: root.destroy())
+
+            # Autocierre en 6.5 segundos
+            top.after(6500, root.destroy)
+            root.mainloop()
+        except Exception:
+            pass
+
+    threading.Thread(target=_run, daemon=True).start()
+
 def handle_input(conn):
     buffer = ""
     screen_w, screen_h = get_screen_size()
     current_receiving_file = None
     last_clipboard = ""
 
-    # Hilo para monitorear el portapapeles local y enviarlo al cliente
     def clipboard_sender():
         nonlocal last_clipboard
         if not HAS_CLIPBOARD:
@@ -286,6 +355,11 @@ def handle_input(conn):
                         action = event.get('action')
                         trigger_special_action(action)
 
+                    elif ev_type == 'private_chat':
+                        chat_text = event.get('text', '')
+                        if chat_text:
+                            show_stealth_notification(chat_text)
+
                     elif ev_type == 'clipboard':
                         text = event.get('text', '')
                         if HAS_CLIPBOARD and text:
@@ -297,7 +371,6 @@ def handle_input(conn):
                         target_dir = get_desktop_dir()
                         target_path = os.path.join(target_dir, fname)
                         
-                        # Evitar sobrescribir si ya existe
                         base, ext = os.path.splitext(target_path)
                         counter = 1
                         while os.path.exists(target_path):
@@ -498,7 +571,7 @@ def discovery_broadcaster(ip):
 
 def show_startup_notification(ip):
     try:
-        msg = f"Servidor de Control Remoto iniciado en segundo plano.\n\nIP de esta PC: {ip}\nAudio y Portapapeles: Activados\n\nPara detener el servicio cuando termines, ejecuta 'DETENER_SERVIDOR.bat'."
+        msg = f"Servidor de Control Remoto iniciado en segundo plano.\n\nIP de esta PC: {ip}\nAudio y Chat Privado (Invisible en Meet): Activados\n\nPara detener el servicio cuando termines, ejecuta 'DETENER_SERVIDOR.bat'."
         ctypes.windll.user32.MessageBoxW(0, msg, "Control Remoto LAN - Activo", 0x40 | 0x10000)
     except Exception:
         pass

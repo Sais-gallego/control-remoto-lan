@@ -1,30 +1,34 @@
 # Control Remoto Espejo LAN (Versión Profesional)
 
-Sistema de control remoto directo **PC a PC por red local (LAN)** con transmisión de video, sonido de llamadas (Google Meet/Zoom), portapapeles compartido y transferencia de archivos.
+Sistema de control remoto directo **PC a PC por red local (LAN)** con transmisión de video, sonido de llamadas (Google Meet/Zoom), portapapeles compartido, transferencia de archivos y **chat privado invisible para transmisiones de pantalla**.
 
 ---
 
 ### Nuevas Funciones Implementadas
 
-1. **Portapapeles Compartido (Copiar y Pegar entre PCs):**  
-   Copia cualquier texto, contraseña, enlace o mensaje en una PC con `Ctrl + C` y pégalo directamente en la otra con `Ctrl + V`. La sincronización es instantánea y bidireccional.
-2. **Modo "Solo Observar" (Bloqueo de Ratón para el que controla):**  
-   - Presiona **`F5`** en cualquier momento para activar o desactivar este modo.
-   - **¿Para qué sirve?** Bloquea el envío de tus movimientos de ratón y clics hacia la otra PC. Puedes mover tu cursor libremente por la pantalla para ver y escuchar la llamada de Meet con total tranquilidad, sin riesgo de moverle el mouse a la otra persona por accidente.
-   - Vuelve a presionar **`F5`** cuando quieras retomar el control activo.
-3. **Transferencia Rápida de Archivos (Arrastrar y Soltar):**  
-   Arrastra cualquier archivo desde tu explorador de Windows y **suéltalo directamente sobre la ventana de control remoto**. El archivo se transferirá a máxima velocidad por la red local y aparecerá automáticamente en el **Escritorio** de la otra PC.
-4. **Funciones Especiales (Inicio Automático con Windows):**  
-   Dentro de la carpeta `funciones_especiales/`:
-   - **`ACTIVAR_INICIO_AUTOMATICO.bat`:** Hace que el servidor inicie en segundo plano automáticamente cada vez que se encienda esa computadora, para tener siempre acceso sin tocar nada.
-   - **`DESACTIVAR_INICIO_AUTOMATICO.bat`:** Quita el inicio automático si ya no lo necesitas.
-5. **Audio en Vivo (Google Meet, videos, llamadas):**  
+1. **Chat Privado Discreto (Invisible en Google Meet / Zoom):**  
+   - Presiona **`F9`** en la ventana de control remoto para abrir la barra de chat privada.
+   - Escribe tu indicación (ej. *"Abre el micrófono"*, *"Pasa a la siguiente lámina"*, *"Ya te pasé el archivo"*) y presiona **Enter**.
+   - **Exclusión de captura de pantalla (`WDA_EXCLUDEFROMCAPTURE`):** En la otra PC aparece una tarjeta flotante elegante con el mensaje, pero **Google Meet, Zoom, Teams o grabadores de pantalla NO LA MUESTRAN**. Para los demás participantes de la llamada de Meet, la pantalla se ve completamente limpia: nadie sabrá que le estás enviando mensajes privados.
+   - Al escribir en el chat con `F9`, tus teclas no se escribirán por error en las ventanas de la otra PC.
+2. **Portapapeles Compartido (Copiar y Pegar entre PCs):**  
+   Copia cualquier texto o enlace en una PC con `Ctrl + C` y pégalo directamente en la otra con `Ctrl + V`.
+3. **Modo "Solo Observar" (Bloqueo de Ratón para el que controla):**  
+   - Presiona **`F5`** para activar o desactivar el envío de tus movimientos de ratón. Te permite ver y escuchar la llamada de Meet sin riesgo de mover el cursor ajeno.
+4. **Transferencia Rápida de Archivos (Arrastrar y Soltar):**  
+   Arrastra cualquier archivo desde tu explorador de Windows y **suéltalo dentro de la ventana**. El archivo se transferirá a máxima velocidad y aparecerá en el **Escritorio** de la otra PC.
+5. **Audio en Vivo (Meet, videos, llamadas):**  
    Escucha todo lo que suena en la otra computadora por tus altavoces o auriculares en tiempo real. Presiona **`M`** para silenciar/activar.
+6. **Inicio Automático con Windows (Opcional):**  
+   En la carpeta `funciones_especiales/`:
+   - `ACTIVAR_INICIO_AUTOMATICO.bat` para iniciar en segundo plano cada vez que se encienda la PC.
+   - `DESACTIVAR_INICIO_AUTOMATICO.bat` para quitarlo.
 
 ---
 
 ### Resumen de Atajos de Teclado (En la PC que controla)
 
+- **`F9`:** Abrir / Cerrar **Chat Privado (Invisible en Meet)**.
 - **`F5`:** Alternar Modo **Solo Observar** (Bloquear/Desbloquear ratón para el que controla).
 - **`M`:** Silenciar / Activar audio remoto.
 - **`Arrastrar archivo a la ventana`:** Envía el archivo al Escritorio de la otra PC.

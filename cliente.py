@@ -112,7 +112,7 @@ def audio_receiver_loop(server_ip, is_running_func, is_muted_func):
 
 def main():
     print("=" * 65)
-    print("       CLIENTE DE CONTROL REMOTO LAN PROFESIONAL              ")
+    print("       CLIENTE DE CONTROL REMOTO LAN CON CHAT PRIVADO         ")
     print("=" * 65)
 
     server_ip = None
@@ -159,6 +159,9 @@ def main():
     native_w, native_h = info['width'], info['height']
 
     pygame.init()
+    pygame.font.init()
+    chat_font = pygame.font.SysFont("segoeui", 17)
+    hint_font = pygame.font.SysFont("segoeui", 13)
 
     CODE_TO_CURSOR = {
         0: pygame.SYSTEM_CURSOR_ARROW,
@@ -189,7 +192,12 @@ def main():
 
     fullscreen = False
     is_muted = False
-    view_only_mode = False  # Modo solo observar (ratón y teclado bloqueados para no interrumpir)
+    view_only_mode = False
+
+    # Estado del chat privado
+    is_chatting = False
+    chat_input_text = ""
+
     status_notification = ""
     status_timer = 0
     running = True
@@ -199,10 +207,10 @@ def main():
             pygame.display.set_caption(f"Control Remoto | {status_notification}")
             return
 
-        mode_str = "[MODO: SOLO OBSERVAR (Raton bloqueado)]" if view_only_mode else "[MODO: CONTROL ACTIVO]"
+        mode_str = "[MODO: SOLO OBSERVAR]" if view_only_mode else "[CONTROL ACTIVO]"
         audio_str = "MUTED" if is_muted else "AUDIO ON"
         pygame.display.set_caption(
-            f"Control Remoto LAN - {server_ip} | {mode_str} | {audio_str} | F5: Bloquear raton | M: Silenciar"
+            f"Control Remoto LAN - {server_ip} | {mode_str} | {audio_str} | F9: Chat Privado (Meet) | F5: Bloquear | M: Silenciar"
         )
 
     update_window_title()
@@ -220,7 +228,6 @@ def main():
         except Exception:
             pass
 
-    # Enviar archivo arrastrado y soltado
     def send_file(filepath):
         nonlocal status_notification, status_timer
         try:
@@ -250,7 +257,6 @@ def main():
             status_timer = time.time() + 4
             update_window_title()
 
-    # Hilo para recibir portapapeles y respuestas del servidor
     def input_receiver_loop():
         nonlocal last_clipboard, running
         buffer = ""
@@ -276,7 +282,6 @@ def main():
     t_in_recv = threading.Thread(target=input_receiver_loop, daemon=True)
     t_in_recv.start()
 
-    # Hilo para monitorear el portapapeles de esta computadora y sincronizarlo
     def clipboard_monitor():
         nonlocal last_clipboard, running
         if not HAS_CLIPBOARD:
@@ -340,7 +345,6 @@ def main():
                 break
 
             elif event.type == pygame.DROPFILE:
-                # Arrastrar y soltar archivo para enviarlo a la otra PC
                 dropped_path = event.file
                 if os.path.isfile(dropped_path):
                     threading.Thread(target=send_file, args=(dropped_path,), daemon=True).start()
@@ -351,8 +355,32 @@ def main():
                     screen = pygame.display.set_mode((win_w, win_h), pygame.RESIZABLE)
 
             elif event.type == pygame.KEYDOWN:
-                if event.key == pygame.K_F5:
-                    # Alternar Modo Solo Observar (Bloqueo de raton y teclado para el que controla)
+                # Si estamos escribiendo un mensaje privado, las teclas van al chat y NO a la PC remota
+                if is_chatting:
+                    if event.key == pygame.K_RETURN:
+                        if chat_input_text.strip():
+                            send_event({"type": "private_chat", "text": chat_input_text.strip()})
+                            status_notification = "¡Mensaje privado enviado (Invisible en Meet)!"
+                            status_timer = now + 4
+                            update_window_title()
+                        is_chatting = False
+                        chat_input_text = ""
+                    elif event.key == pygame.K_ESCAPE:
+                        is_chatting = False
+                        chat_input_text = ""
+                    elif event.key == pygame.K_BACKSPACE:
+                        chat_input_text = chat_input_text[:-1]
+                    else:
+                        if event.unicode and len(chat_input_text) < 120:
+                            chat_input_text += event.unicode
+                    continue
+
+                # Atajos generales
+                if event.key == pygame.K_F9:
+                    # Abrir barra de chat privado
+                    is_chatting = True
+                    chat_input_text = ""
+                elif event.key == pygame.K_F5:
                     view_only_mode = not view_only_mode
                     update_window_title()
                 elif event.key == pygame.K_m:
@@ -371,7 +399,6 @@ def main():
                     win_w, win_h = native_w, native_h
                     screen = pygame.display.set_mode((win_w, win_h), pygame.RESIZABLE)
                 elif not view_only_mode:
-                    # Enviar teclas solo si NO estamos en modo Solo Observar
                     if event.key == pygame.K_F1:
                         send_event({"type": "special_action", "action": "win_key"})
                     elif event.key == pygame.K_F2:
@@ -386,14 +413,13 @@ def main():
                         send_event({"type": "key_down", "key": kname, "char": char})
 
             elif event.type == pygame.KEYUP:
-                if not view_only_mode:
-                    if event.key not in (pygame.K_F1, pygame.K_F2, pygame.K_F3, pygame.K_F4, pygame.K_F5, pygame.K_F10, pygame.K_F11, pygame.K_m):
+                if not is_chatting and not view_only_mode:
+                    if event.key not in (pygame.K_F1, pygame.K_F2, pygame.K_F3, pygame.K_F4, pygame.K_F5, pygame.K_F9, pygame.K_F10, pygame.K_F11, pygame.K_m):
                         kname = pygame.key.name(event.key)
                         char = event.unicode if event.unicode else None
                         send_event({"type": "key_up", "key": kname, "char": char})
 
             elif event.type == pygame.MOUSEMOTION:
-                # Solo enviar movimiento si no estamos en modo solo observar
                 if not view_only_mode:
                     if now - last_mouse_send >= 0.010:
                         mx, my = event.pos
@@ -416,7 +442,6 @@ def main():
                     if event.button in (1, 2, 3):
                         send_event({"type": "mouse_up", "button": event.button})
 
-        # Actualizar titulo si expiro notificacion
         if status_notification and now >= status_timer:
             status_notification = ""
             update_window_title()
@@ -433,14 +458,37 @@ def main():
                 except Exception:
                     pass
 
+        # Dibujar pantalla remota
         if surf_to_draw is not None:
             if win_w == native_w and win_h == native_h:
                 screen.blit(surf_to_draw, (0, 0))
             else:
                 scaled = pygame.transform.smoothscale(surf_to_draw, (win_w, win_h))
                 screen.blit(scaled, (0, 0))
-            pygame.display.flip()
 
+        # Dibujar barra de Chat Privado si esta activa
+        if is_chatting:
+            bar_h = 48
+            bar_y = win_h - bar_h
+            # Fondo oscuro elegante
+            bar_surface = pygame.Surface((win_w, bar_h), pygame.SRCALPHA)
+            bar_surface.fill((24, 24, 37, 240))
+            screen.blit(bar_surface, (0, bar_y))
+            pygame.draw.line(screen, (137, 180, 250), (0, bar_y), (win_w, bar_y), 2)
+
+            prefix = "💬 Mensaje Privado (Oculto en Meet): "
+            prefix_surf = chat_font.render(prefix, True, (137, 180, 250))
+            screen.blit(prefix_surf, (15, bar_y + 12))
+
+            cursor_char = "|" if int(now * 2) % 2 == 0 else ""
+            txt_surf = chat_font.render(chat_input_text + cursor_char, True, (255, 255, 255))
+            screen.blit(txt_surf, (15 + prefix_surf.get_width(), bar_y + 12))
+
+            hint_text = "[Enter: Enviar | Esc: Cancelar]"
+            hint_surf = hint_font.render(hint_text, True, (166, 173, 200))
+            screen.blit(hint_surf, (win_w - hint_surf.get_width() - 15, bar_y + 16))
+
+        pygame.display.flip()
         clock.tick(60)
 
     video_sock.close()
