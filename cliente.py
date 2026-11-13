@@ -34,7 +34,6 @@ def recv_all(sock, size):
     return bytes(buf)
 
 def auto_discover_server(timeout=1.2):
-    # Escucha la red local para detectar la otra PC automáticamente
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.settimeout(timeout)
@@ -90,7 +89,6 @@ def main():
         input("Presiona Enter para salir...")
         return
 
-    # Recibir resolución original del servidor
     hdr_len_bytes = recv_all(video_sock, 4)
     if not hdr_len_bytes:
         print("No se pudo recibir configuracion de pantalla.")
@@ -102,7 +100,6 @@ def main():
 
     pygame.init()
 
-    # Mapeo de códigos a cursores nativos
     CODE_TO_CURSOR = {
         0: pygame.SYSTEM_CURSOR_ARROW,
         1: pygame.SYSTEM_CURSOR_IBEAM,
@@ -128,7 +125,7 @@ def main():
         win_h = int(native_h * scale_factor)
 
     screen = pygame.display.set_mode((win_w, win_h), pygame.RESIZABLE)
-    pygame.display.set_caption(f"Control Remoto LAN - {server_ip} (F11: Pantalla Completa)")
+    pygame.display.set_caption(f"Control Remoto LAN - {server_ip} (F1: Inicio | F2: Alt+Tab | F3: Ventanas | F11: Completa)")
     clock = pygame.time.Clock()
 
     fullscreen = False
@@ -201,15 +198,25 @@ def main():
                 elif event.key == pygame.K_F10:
                     win_w, win_h = native_w, native_h
                     screen = pygame.display.set_mode((win_w, win_h), pygame.RESIZABLE)
+                # Atajos especiales de Windows para manipular ventanas facilmente:
+                elif event.key == pygame.K_F1:
+                    send_event({"type": "special_action", "action": "win_key"})
+                elif event.key == pygame.K_F2:
+                    send_event({"type": "special_action", "action": "alt_tab"})
+                elif event.key == pygame.K_F3:
+                    send_event({"type": "special_action", "action": "win_tab"})
+                elif event.key == pygame.K_F4:
+                    send_event({"type": "special_action", "action": "show_desktop"})
                 else:
                     kname = pygame.key.name(event.key)
                     char = event.unicode if event.unicode else None
                     send_event({"type": "key_down", "key": kname, "char": char})
 
             elif event.type == pygame.KEYUP:
-                kname = pygame.key.name(event.key)
-                char = event.unicode if event.unicode else None
-                send_event({"type": "key_up", "key": kname, "char": char})
+                if event.key not in (pygame.K_F1, pygame.K_F2, pygame.K_F3, pygame.K_F4, pygame.K_F10, pygame.K_F11):
+                    kname = pygame.key.name(event.key)
+                    char = event.unicode if event.unicode else None
+                    send_event({"type": "key_up", "key": kname, "char": char})
 
             elif event.type == pygame.MOUSEMOTION:
                 if now - last_mouse_send >= 0.010:
@@ -231,7 +238,6 @@ def main():
                 if event.button in (1, 2, 3):
                     send_event({"type": "mouse_up", "button": event.button})
 
-        # Actualizar cursor automáticamente
         with frame_lock:
             cur_code = latest_cursor_code
             surf_to_draw = latest_surface
@@ -244,7 +250,6 @@ def main():
                 except Exception:
                     pass
 
-        # Dibujar frame
         if surf_to_draw is not None:
             if win_w == native_w and win_h == native_h:
                 screen.blit(surf_to_draw, (0, 0))

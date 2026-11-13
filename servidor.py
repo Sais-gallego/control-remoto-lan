@@ -5,6 +5,7 @@ import json
 import time
 import sys
 import ctypes
+from ctypes import wintypes
 import numpy as np
 import cv2
 
@@ -38,17 +39,21 @@ PORT_VIDEO = 5555
 PORT_INPUT = 5556
 PORT_DISCOVERY = 5557
 
+user32 = ctypes.windll.user32
 mouse = MouseController()
 keyboard = KeyboardController()
 
-# Modo unico equilibrado: rapido, nitido y sin complicaciones
+# Constantes de eventos de raton nativos de Windows
+MOUSEEVENTF_MOVE = 0x0001
+MOUSEEVENTF_ABSOLUTE = 0x8000
+
+# Perfil equilibrado de alta fidelidad
 ENCODE_PARAMS = [cv2.IMWRITE_JPEG_QUALITY, 85, cv2.IMWRITE_JPEG_OPTIMIZE, 0]
 
-# Codigos de cursores nativos sincronizados
 CURSOR_CODES = {
     'arrow': 0,
-    'ibeam': 1,      # Texto / input / punto de insercion
-    'hand': 2,       # Enlaces / botones clickeables
+    'ibeam': 1,      # Texto / input / insercion
+    'hand': 2,       # Enlaces / botones
     'cross': 3,      # Cruz
     'wait': 4,       # Espera
     'sizens': 5,     # Redimensionar vertical
@@ -130,7 +135,6 @@ def get_local_ip():
     return ip
 
 def get_screen_size():
-    user32 = ctypes.windll.user32
     return user32.GetSystemMetrics(0), user32.GetSystemMetrics(1)
 
 def get_active_cursor():
@@ -168,9 +172,31 @@ def capture_screen():
             return img[:, :, :3]
         except Exception:
             pass
-    pil_img = ImageGrab.grab(all_screens=False)
+    # Capturar incluyendo ventanas translucidas y miniaturas de barra de tareas (include_layered_windows=True)
+    pil_img = ImageGrab.grab(all_screens=False, include_layered_windows=True)
     frame = np.array(pil_img)
     return cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+
+def trigger_special_action(action):
+    # Acciones especiales para navegacion y ventanas
+    if action == "win_key":
+        keyboard.press(Key.cmd)
+        keyboard.release(Key.cmd)
+    elif action == "alt_tab":
+        keyboard.press(Key.alt)
+        keyboard.press(Key.tab)
+        keyboard.release(Key.tab)
+        keyboard.release(Key.alt)
+    elif action == "win_tab":
+        keyboard.press(Key.cmd)
+        keyboard.press(Key.tab)
+        keyboard.release(Key.tab)
+        keyboard.release(Key.cmd)
+    elif action == "show_desktop":
+        keyboard.press(Key.cmd)
+        keyboard.press('d')
+        keyboard.release('d')
+        keyboard.release(Key.cmd)
 
 def handle_input(conn):
     buffer = ""
@@ -193,7 +219,14 @@ def handle_input(conn):
                         nx, ny = event['x'], event['y']
                         target_x = int(nx * screen_w)
                         target_y = int(ny * screen_h)
-                        mouse.position = (target_x, target_y)
+                        
+                        # SetCursorPos directo
+                        user32.SetCursorPos(target_x, target_y)
+                        # mouse_event para generar el evento nativo de hover en Windows DWM
+                        # Esto activa las miniaturas y previsualizaciones de ventanas en la barra de tareas
+                        norm_x = int(nx * 65535)
+                        norm_y = int(ny * 65535)
+                        user32.mouse_event(MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_MOVE, norm_x, norm_y, 0, 0)
 
                     elif ev_type == 'mouse_down':
                         btn = event.get('button')
@@ -216,6 +249,10 @@ def handle_input(conn):
                     elif ev_type == 'mouse_scroll':
                         dy = event.get('dy', 0)
                         mouse.scroll(0, dy)
+
+                    elif ev_type == 'special_action':
+                        action = event.get('action')
+                        trigger_special_action(action)
 
                     elif ev_type == 'key_down':
                         key_str = event.get('key', '').lower()
@@ -272,17 +309,21 @@ def video_server():
                 now = time.time()
                 frame = capture_screen()
 
-                curr_sample = frame[::16, ::16]
+                curr_sample = frame[::8, ::8]  # Muestreo a paso 8 para detectar miniaturas flotantes
                 curr_mouse = mouse.position
                 cur_name = get_active_cursor()
                 cur_code = CURSOR_CODES.get(cur_name, 0)
+
+                # Si el mouse esta sobre la barra de tareas (zona inferior), refrescar con maxima frecuencia
+                is_on_taskbar = (curr_mouse[1] >= (h - 70))
 
                 has_changed = (
                     prev_sample is None or
                     curr_mouse != last_mouse_pos or
                     cur_code != last_cursor_code or
+                    is_on_taskbar or
                     cv2.absdiff(curr_sample, prev_sample).any() or
-                    (now - last_sent_time > 0.3)
+                    (now - last_sent_time > 0.25)
                 )
 
                 if has_changed:
@@ -318,7 +359,6 @@ def input_server():
         handle_input(conn)
 
 def discovery_broadcaster(ip):
-    # Emite presencia en la red local para que el cliente detecte la IP automáticamente
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
     msg = json.dumps({"app": "remote_lan_desk", "ip": ip}).encode('utf-8')
@@ -330,7 +370,6 @@ def discovery_broadcaster(ip):
         time.sleep(1.0)
 
 def show_startup_notification(ip):
-    # Aviso informativo sin terminal que no interrumpe y se cierra al aceptar
     try:
         msg = f"Servidor de Control Remoto iniciado en segundo plano.\n\nIP de esta PC: {ip}\n\nPara detener el servicio cuando termines, ejecuta 'DETENER_SERVIDOR.bat'."
         ctypes.windll.user32.MessageBoxW(0, msg, "Control Remoto LAN - Activo", 0x40 | 0x10000)
@@ -340,19 +379,15 @@ def show_startup_notification(ip):
 def main():
     ip = get_local_ip()
 
-    # Iniciar hilo de auto-deteccion en la red LAN
     t_disc = threading.Thread(target=discovery_broadcaster, args=(ip,), daemon=True)
     t_disc.start()
 
-    # Iniciar servidor de input
     t_input = threading.Thread(target=input_server, daemon=True)
     t_input.start()
 
-    # Notificacion nativa de inicio (hilo separado para no bloquear)
     t_notify = threading.Thread(target=show_startup_notification, args=(ip,), daemon=True)
     t_notify.start()
 
-    # Servidor de video en bucle principal
     video_server()
 
 if __name__ == '__main__':
