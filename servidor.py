@@ -4,6 +4,8 @@ import struct
 import json
 import time
 import sys
+import os
+import base64
 import ctypes
 import numpy as np
 import cv2
@@ -34,6 +36,12 @@ try:
     HAS_AUDIO = True
 except ImportError:
     HAS_AUDIO = False
+
+try:
+    import pyperclip
+    HAS_CLIPBOARD = True
+except ImportError:
+    HAS_CLIPBOARD = False
 
 from PIL import ImageGrab
 from pynput.mouse import Controller as MouseController, Button
@@ -199,12 +207,38 @@ def trigger_special_action(action):
         keyboard.release('d')
         keyboard.release(Key.cmd)
 
+def get_desktop_dir():
+    desktop = os.path.join(os.path.expanduser('~'), 'Desktop')
+    return desktop if os.path.exists(desktop) else os.path.expanduser('~')
+
 def handle_input(conn):
     buffer = ""
     screen_w, screen_h = get_screen_size()
+    current_receiving_file = None
+    last_clipboard = ""
+
+    # Hilo para monitorear el portapapeles local y enviarlo al cliente
+    def clipboard_sender():
+        nonlocal last_clipboard
+        if not HAS_CLIPBOARD:
+            return
+        while True:
+            try:
+                text = pyperclip.paste()
+                if text and text != last_clipboard:
+                    last_clipboard = text
+                    msg = json.dumps({"type": "clipboard", "text": text}) + '\n'
+                    conn.sendall(msg.encode('utf-8'))
+            except Exception:
+                break
+            time.sleep(0.4)
+
+    t_clip = threading.Thread(target=clipboard_sender, daemon=True)
+    t_clip.start()
+
     try:
         while True:
-            data = conn.recv(4096)
+            data = conn.recv(65536)
             if not data:
                 break
             buffer += data.decode('utf-8', errors='ignore')
@@ -252,6 +286,36 @@ def handle_input(conn):
                         action = event.get('action')
                         trigger_special_action(action)
 
+                    elif ev_type == 'clipboard':
+                        text = event.get('text', '')
+                        if HAS_CLIPBOARD and text:
+                            last_clipboard = text
+                            pyperclip.copy(text)
+
+                    elif ev_type == 'file_start':
+                        fname = os.path.basename(event.get('filename', 'archivo_recibido'))
+                        target_dir = get_desktop_dir()
+                        target_path = os.path.join(target_dir, fname)
+                        
+                        # Evitar sobrescribir si ya existe
+                        base, ext = os.path.splitext(target_path)
+                        counter = 1
+                        while os.path.exists(target_path):
+                            target_path = f"{base} ({counter}){ext}"
+                            counter += 1
+
+                        current_receiving_file = open(target_path, 'wb')
+
+                    elif ev_type == 'file_chunk':
+                        if current_receiving_file:
+                            raw_bytes = base64.b64decode(event.get('data', ''))
+                            current_receiving_file.write(raw_bytes)
+
+                    elif ev_type == 'file_end':
+                        if current_receiving_file:
+                            current_receiving_file.close()
+                            current_receiving_file = None
+
                     elif ev_type == 'key_down':
                         key_str = event.get('key', '').lower()
                         char = event.get('char')
@@ -279,6 +343,11 @@ def handle_input(conn):
     except Exception:
         pass
     finally:
+        if current_receiving_file:
+            try:
+                current_receiving_file.close()
+            except Exception:
+                pass
         conn.close()
 
 def video_server():
@@ -344,7 +413,6 @@ def video_server():
             conn.close()
 
 def audio_server():
-    # Transmite el audio del sistema (Meet, videos, llamadas) en tiempo real
     if not HAS_AUDIO:
         return
 
@@ -430,7 +498,7 @@ def discovery_broadcaster(ip):
 
 def show_startup_notification(ip):
     try:
-        msg = f"Servidor de Control Remoto iniciado en segundo plano.\n\nIP de esta PC: {ip}\nAudio remoto: Activado\n\nPara detener el servicio cuando termines, ejecuta 'DETENER_SERVIDOR.bat'."
+        msg = f"Servidor de Control Remoto iniciado en segundo plano.\n\nIP de esta PC: {ip}\nAudio y Portapapeles: Activados\n\nPara detener el servicio cuando termines, ejecuta 'DETENER_SERVIDOR.bat'."
         ctypes.windll.user32.MessageBoxW(0, msg, "Control Remoto LAN - Activo", 0x40 | 0x10000)
     except Exception:
         pass

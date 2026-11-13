@@ -5,6 +5,7 @@ import threading
 import time
 import sys
 import os
+import base64
 import ctypes
 import cv2
 import numpy as np
@@ -22,6 +23,12 @@ try:
     HAS_AUDIO = True
 except ImportError:
     HAS_AUDIO = False
+
+try:
+    import pyperclip
+    HAS_CLIPBOARD = True
+except ImportError:
+    HAS_CLIPBOARD = False
 
 os.environ['PYGAME_HIDE_SUPPORT_PROMPT'] = "1"
 import pygame
@@ -105,7 +112,7 @@ def audio_receiver_loop(server_ip, is_running_func, is_muted_func):
 
 def main():
     print("=" * 65)
-    print("       CLIENTE DE CONTROL REMOTO LAN CON AUDIO EN VIVO        ")
+    print("       CLIENTE DE CONTROL REMOTO LAN PROFESIONAL              ")
     print("=" * 65)
 
     server_ip = None
@@ -136,7 +143,7 @@ def main():
         input_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         input_sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         input_sock.connect((server_ip, PORT_INPUT))
-        print("¡Conexion de video y control establecida!")
+        print("¡Conexion establecida con exito!")
     except Exception as e:
         print(f"Error al conectar con la PC destino: {e}")
         input("Presiona Enter para salir...")
@@ -182,12 +189,20 @@ def main():
 
     fullscreen = False
     is_muted = False
+    view_only_mode = False  # Modo solo observar (ratón y teclado bloqueados para no interrumpir)
+    status_notification = ""
+    status_timer = 0
     running = True
 
     def update_window_title():
-        audio_status = "MUTED" if is_muted else "ACTIVO"
+        if status_notification and time.time() < status_timer:
+            pygame.display.set_caption(f"Control Remoto | {status_notification}")
+            return
+
+        mode_str = "[MODO: SOLO OBSERVAR (Raton bloqueado)]" if view_only_mode else "[MODO: CONTROL ACTIVO]"
+        audio_str = "MUTED" if is_muted else "AUDIO ON"
         pygame.display.set_caption(
-            f"Control Remoto LAN - {server_ip} | Audio: {audio_status} (M: Silenciar) | F11: Completa"
+            f"Control Remoto LAN - {server_ip} | {mode_str} | {audio_str} | F5: Bloquear raton | M: Silenciar"
         )
 
     update_window_title()
@@ -196,6 +211,7 @@ def main():
     latest_surface = None
     latest_cursor_code = 0
     active_cursor_code = -1
+    last_clipboard = ""
 
     def send_event(ev_dict):
         try:
@@ -203,6 +219,80 @@ def main():
             input_sock.sendall(msg.encode('utf-8'))
         except Exception:
             pass
+
+    # Enviar archivo arrastrado y soltado
+    def send_file(filepath):
+        nonlocal status_notification, status_timer
+        try:
+            fname = os.path.basename(filepath)
+            fsize = os.path.getsize(filepath)
+            status_notification = f"Enviando '{fname}' ({round(fsize / (1024*1024), 1)} MB)..."
+            status_timer = time.time() + 5
+            update_window_title()
+
+            send_event({"type": "file_start", "filename": fname, "filesize": fsize})
+
+            with open(filepath, 'rb') as f:
+                while True:
+                    chunk = f.read(65536)
+                    if not chunk:
+                        break
+                    b64_chunk = base64.b64encode(chunk).decode('ascii')
+                    send_event({"type": "file_chunk", "data": b64_chunk})
+
+            send_event({"type": "file_end", "filename": fname})
+
+            status_notification = f"¡'{fname}' enviado al Escritorio de la otra PC!"
+            status_timer = time.time() + 4
+            update_window_title()
+        except Exception as e:
+            status_notification = f"Error al enviar archivo: {e}"
+            status_timer = time.time() + 4
+            update_window_title()
+
+    # Hilo para recibir portapapeles y respuestas del servidor
+    def input_receiver_loop():
+        nonlocal last_clipboard, running
+        buffer = ""
+        while running:
+            try:
+                data = input_sock.recv(4096)
+                if not data:
+                    break
+                buffer += data.decode('utf-8', errors='ignore')
+                while '\n' in buffer:
+                    line, buffer = buffer.split('\n', 1)
+                    if not line.strip():
+                        continue
+                    event = json.loads(line)
+                    if event.get('type') == 'clipboard':
+                        text = event.get('text', '')
+                        if HAS_CLIPBOARD and text:
+                            last_clipboard = text
+                            pyperclip.copy(text)
+            except Exception:
+                break
+
+    t_in_recv = threading.Thread(target=input_receiver_loop, daemon=True)
+    t_in_recv.start()
+
+    # Hilo para monitorear el portapapeles de esta computadora y sincronizarlo
+    def clipboard_monitor():
+        nonlocal last_clipboard, running
+        if not HAS_CLIPBOARD:
+            return
+        while running:
+            try:
+                text = pyperclip.paste()
+                if text and text != last_clipboard:
+                    last_clipboard = text
+                    send_event({"type": "clipboard", "text": text})
+            except Exception:
+                pass
+            time.sleep(0.4)
+
+    t_clip = threading.Thread(target=clipboard_monitor, daemon=True)
+    t_clip.start()
 
     def video_receiver_loop():
         nonlocal latest_surface, latest_cursor_code, running
@@ -232,7 +322,6 @@ def main():
     t_recv = threading.Thread(target=video_receiver_loop, daemon=True)
     t_recv.start()
 
-    # Iniciar recepción y reproducción de audio remoto en tiempo real
     t_audio = threading.Thread(
         target=audio_receiver_loop,
         args=(server_ip, lambda: running, lambda: is_muted),
@@ -250,13 +339,26 @@ def main():
                 running = False
                 break
 
+            elif event.type == pygame.DROPFILE:
+                # Arrastrar y soltar archivo para enviarlo a la otra PC
+                dropped_path = event.file
+                if os.path.isfile(dropped_path):
+                    threading.Thread(target=send_file, args=(dropped_path,), daemon=True).start()
+
             elif event.type == pygame.VIDEORESIZE:
                 if not fullscreen:
                     win_w, win_h = event.w, event.h
                     screen = pygame.display.set_mode((win_w, win_h), pygame.RESIZABLE)
 
             elif event.type == pygame.KEYDOWN:
-                if event.key == pygame.K_F11:
+                if event.key == pygame.K_F5:
+                    # Alternar Modo Solo Observar (Bloqueo de raton y teclado para el que controla)
+                    view_only_mode = not view_only_mode
+                    update_window_title()
+                elif event.key == pygame.K_m:
+                    is_muted = not is_muted
+                    update_window_title()
+                elif event.key == pygame.K_F11:
                     fullscreen = not fullscreen
                     if fullscreen:
                         screen = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
@@ -268,48 +370,56 @@ def main():
                 elif event.key == pygame.K_F10:
                     win_w, win_h = native_w, native_h
                     screen = pygame.display.set_mode((win_w, win_h), pygame.RESIZABLE)
-                elif event.key == pygame.K_m:
-                    # Alternar silencio del audio remoto
-                    is_muted = not is_muted
-                    update_window_title()
-                elif event.key == pygame.K_F1:
-                    send_event({"type": "special_action", "action": "win_key"})
-                elif event.key == pygame.K_F2:
-                    send_event({"type": "special_action", "action": "alt_tab"})
-                elif event.key == pygame.K_F3:
-                    send_event({"type": "special_action", "action": "win_tab"})
-                elif event.key == pygame.K_F4:
-                    send_event({"type": "special_action", "action": "show_desktop"})
-                else:
-                    kname = pygame.key.name(event.key)
-                    char = event.unicode if event.unicode else None
-                    send_event({"type": "key_down", "key": kname, "char": char})
+                elif not view_only_mode:
+                    # Enviar teclas solo si NO estamos en modo Solo Observar
+                    if event.key == pygame.K_F1:
+                        send_event({"type": "special_action", "action": "win_key"})
+                    elif event.key == pygame.K_F2:
+                        send_event({"type": "special_action", "action": "alt_tab"})
+                    elif event.key == pygame.K_F3:
+                        send_event({"type": "special_action", "action": "win_tab"})
+                    elif event.key == pygame.K_F4:
+                        send_event({"type": "special_action", "action": "show_desktop"})
+                    else:
+                        kname = pygame.key.name(event.key)
+                        char = event.unicode if event.unicode else None
+                        send_event({"type": "key_down", "key": kname, "char": char})
 
             elif event.type == pygame.KEYUP:
-                if event.key not in (pygame.K_F1, pygame.K_F2, pygame.K_F3, pygame.K_F4, pygame.K_F10, pygame.K_F11, pygame.K_m):
-                    kname = pygame.key.name(event.key)
-                    char = event.unicode if event.unicode else None
-                    send_event({"type": "key_up", "key": kname, "char": char})
+                if not view_only_mode:
+                    if event.key not in (pygame.K_F1, pygame.K_F2, pygame.K_F3, pygame.K_F4, pygame.K_F5, pygame.K_F10, pygame.K_F11, pygame.K_m):
+                        kname = pygame.key.name(event.key)
+                        char = event.unicode if event.unicode else None
+                        send_event({"type": "key_up", "key": kname, "char": char})
 
             elif event.type == pygame.MOUSEMOTION:
-                if now - last_mouse_send >= 0.010:
-                    mx, my = event.pos
-                    nx = max(0.0, min(1.0, mx / win_w))
-                    ny = max(0.0, min(1.0, my / win_h))
-                    send_event({"type": "mouse_move", "x": nx, "y": ny})
-                    last_mouse_send = now
+                # Solo enviar movimiento si no estamos en modo solo observar
+                if not view_only_mode:
+                    if now - last_mouse_send >= 0.010:
+                        mx, my = event.pos
+                        nx = max(0.0, min(1.0, mx / win_w))
+                        ny = max(0.0, min(1.0, my / win_h))
+                        send_event({"type": "mouse_move", "x": nx, "y": ny})
+                        last_mouse_send = now
 
             elif event.type == pygame.MOUSEBUTTONDOWN:
-                if event.button in (1, 2, 3):
-                    send_event({"type": "mouse_down", "button": event.button})
-                elif event.button == 4:
-                    send_event({"type": "mouse_scroll", "dy": 3})
-                elif event.button == 5:
-                    send_event({"type": "mouse_scroll", "dy": -3})
+                if not view_only_mode:
+                    if event.button in (1, 2, 3):
+                        send_event({"type": "mouse_down", "button": event.button})
+                    elif event.button == 4:
+                        send_event({"type": "mouse_scroll", "dy": 3})
+                    elif event.button == 5:
+                        send_event({"type": "mouse_scroll", "dy": -3})
 
             elif event.type == pygame.MOUSEBUTTONUP:
-                if event.button in (1, 2, 3):
-                    send_event({"type": "mouse_up", "button": event.button})
+                if not view_only_mode:
+                    if event.button in (1, 2, 3):
+                        send_event({"type": "mouse_up", "button": event.button})
+
+        # Actualizar titulo si expiro notificacion
+        if status_notification and now >= status_timer:
+            status_notification = ""
+            update_window_title()
 
         with frame_lock:
             cur_code = latest_cursor_code
