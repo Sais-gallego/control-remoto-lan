@@ -37,6 +37,7 @@ except Exception:
         pass
 
 user32 = ctypes.windll.user32
+kernel32 = ctypes.windll.kernel32
 WDA_EXCLUDEFROMCAPTURE = 0x00000011  # Excluye la ventana de Google Meet, Zoom, OBS y grabaciones
 CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".ai_config.json")
 
@@ -93,7 +94,7 @@ class StealthWindowApp:
         # Ocultar root para eliminar completamente el icono de Python de la barra de tareas
         self.root.withdraw()
 
-        # Crear ventana Toplevel como ToolWindow (sin icono en barra de tareas)
+        # Crear ventana Toplevel como ToolWindow (sin icono en barra de tareas ni Alt+Tab)
         self.win = tk.Toplevel(self.root)
         self.win.title("Panel Invisible Pro")
         self.win.geometry("780x600+100+60")
@@ -112,6 +113,9 @@ class StealthWindowApp:
         self.last_ai_response = ""
         self.font_size = 11
 
+        # Almacenar la ventana previa para devolver el foco con F2 o Escape sin tocar el raton
+        self.previous_hwnd = None
+
         # PDF Visual
         self.current_pdf_doc = None
         self.current_pdf_page = 0
@@ -128,8 +132,9 @@ class StealthWindowApp:
         self._apply_stealth_mode()
         self._setup_global_hotkeys()
 
-        # Atajos de ventana
+        # Atajos internos de ventana
         self.win.bind("<Control-f>", lambda e: self._toggle_search_bar())
+        self.win.bind("<Escape>", lambda e: self.release_focus())
         self.win.protocol("WM_DELETE_WINDOW", self.on_close)
 
     def _setup_style(self):
@@ -145,6 +150,7 @@ class StealthWindowApp:
             try:
                 self.hotkey_listener = pynput_kbd.GlobalHotKeys({
                     '<f8>': self._safe_toggle_visibility,
+                    '<f2>': self._safe_toggle_focus,
                     '<ctrl>+<alt>+h': self._safe_toggle_visibility
                 })
                 self.hotkey_listener.daemon = True
@@ -154,6 +160,74 @@ class StealthWindowApp:
 
     def _safe_toggle_visibility(self):
         self.win.after(0, self.toggle_visibility)
+
+    def _safe_toggle_focus(self):
+        self.win.after(0, self.toggle_focus)
+
+    def _set_foreground_without_cursor(self, target_hwnd):
+        """Cambia el foco del teclado a target_hwnd sin mover el cursor del raton ni un pixel"""
+        if not target_hwnd or not user32.IsWindow(target_hwnd):
+            return
+        try:
+            # Guardar posicion exacta del cursor por seguridad absoluta
+            cursor_pos = wintypes.POINT()
+            user32.GetCursorPos(ctypes.byref(cursor_pos))
+
+            curr_thread = kernel32.GetCurrentThreadId()
+            fore_hwnd = user32.GetForegroundWindow()
+            fore_thread = user32.GetWindowThreadProcessId(fore_hwnd, None)
+
+            if curr_thread != fore_thread:
+                user32.AttachThreadInput(curr_thread, fore_thread, True)
+                user32.BringWindowToTop(target_hwnd)
+                user32.ShowWindow(target_hwnd, 5)  # SW_SHOW
+                user32.SetForegroundWindow(target_hwnd)
+                user32.AttachThreadInput(curr_thread, fore_thread, False)
+            else:
+                user32.BringWindowToTop(target_hwnd)
+                user32.SetForegroundWindow(target_hwnd)
+
+            # Restaurar posicion del cursor para garantizar cero movimiento
+            user32.SetCursorPos(cursor_pos.x, cursor_pos.y)
+        except Exception:
+            pass
+
+    def toggle_focus(self):
+        """Con F2 enfoca la ventana invisible para escribir sin mover el cursor, o devuelve el foco a tu app previa"""
+        hwnd_win = user32.GetParent(self.win.winfo_id()) or self.win.winfo_id()
+        current_fore = user32.GetForegroundWindow()
+
+        # Si ya tenemos el foco: devolver el foco a la ventana anterior sin mover el raton
+        if current_fore == hwnd_win or current_fore == self.win.winfo_id():
+            self.release_focus()
+        else:
+            # Guardar la ventana externa que estaba activa (ej. navegador, Google Meet)
+            self.previous_hwnd = current_fore
+
+            # Si estaba oculta, mostrarla
+            if self.is_hidden:
+                self.win.deiconify()
+                self._apply_stealth_mode()
+                self.is_hidden = False
+
+            # Transferir foco a nuestra ventana sin mover el ratón
+            self._set_foreground_without_cursor(hwnd_win)
+            self.win.focus_force()
+            self.lbl_focus.config(text="🟢 Foco: ACTIVO (Escribe ya | F2/Esc para salir)", fg="#a6e3a1")
+
+            # Enfocar el campo de texto correspondiente según la pestaña
+            tab_idx = self.notebook.index(self.notebook.select())
+            if tab_idx == 0:
+                self.entry_prompt.focus_set()
+            elif tab_idx == 1:
+                self.txt_notes.focus_set()
+
+    def release_focus(self):
+        """Devuelve el foco del teclado a la aplicacion anterior sin mover el cursor"""
+        hwnd_win = user32.GetParent(self.win.winfo_id()) or self.win.winfo_id()
+        if self.previous_hwnd and user32.IsWindow(self.previous_hwnd):
+            self._set_foreground_without_cursor(self.previous_hwnd)
+        self.lbl_focus.config(text="⚪ Foco: Externo (F2 para escribir)", fg="#a6adc8")
 
     def _apply_stealth_mode(self):
         """Aplica la exclusion nativa de Windows contra capturas y transmisiones de pantalla"""
@@ -168,7 +242,7 @@ class StealthWindowApp:
         # Excluir de capturas
         res = user32.SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE)
         if res:
-            self.lbl_status.config(text="🛡️ Modo Invisible Activo (Excluido de Meet/Zoom) | Sin icono", fg="#a6e3a1")
+            self.lbl_status.config(text="🛡️ Invisible en Meet | Sin icono en barra", fg="#a6e3a1")
         else:
             self.lbl_status.config(text="⚠️ Modo estándar activo", fg="#f38ba8")
 
@@ -180,12 +254,16 @@ class StealthWindowApp:
         self.lbl_status = tk.Label(top_bar, text="Iniciando...", font=("Segoe UI", 9, "bold"), bg="#11111b", fg="#89b4fa")
         self.lbl_status.pack(side="left")
 
+        # Indicador de Foco (F2)
+        self.lbl_focus = tk.Label(top_bar, text="⚪ Foco: Externo (F2 para escribir)", font=("Segoe UI", 8, "bold"), bg="#11111b", fg="#a6adc8")
+        self.lbl_focus.pack(side="left", padx=(12, 4))
+
         # Opacidad
         lbl_op = tk.Label(top_bar, text="Opacidad:", font=("Segoe UI", 8), bg="#11111b", fg="#a6adc8")
-        lbl_op.pack(side="left", padx=(15, 3))
+        lbl_op.pack(side="left", padx=(12, 3))
         scale_op = tk.Scale(top_bar, from_=0.35, to=1.0, resolution=0.05, orient="horizontal",
                             variable=self.opacity, command=lambda v: self.win.attributes("-alpha", float(v)),
-                            showvalue=False, length=70, bg="#11111b", fg="#89b4fa", highlightthickness=0)
+                            showvalue=False, length=65, bg="#11111b", fg="#89b4fa", highlightthickness=0)
         scale_op.pack(side="left")
 
         # Botón Modo Compacto / Barra
@@ -225,7 +303,7 @@ class StealthWindowApp:
         # 3. Barra inferior de estado
         bottom_bar = tk.Frame(self.win, bg="#11111b", height=22, padx=8, pady=2)
         bottom_bar.pack(side="bottom", fill="x")
-        lbl_hint = tk.Label(bottom_bar, text="F8: Ocultar/Mostrar Global | Ctrl+F: Buscar en apuntes | Arrastra la ventana desde el borde",
+        lbl_hint = tk.Label(bottom_bar, text="F8: Abrir/Ocultar | F2: Escribir sin mover ratón | Esc: Volver a tu app previa | Ctrl+F: Buscar",
                             font=("Segoe UI", 8), bg="#11111b", fg="#6c7086")
         lbl_hint.pack(side="left")
 
@@ -271,7 +349,7 @@ class StealthWindowApp:
         self.txt_chat.tag_configure("sys", foreground="#a6adc8", font=("Segoe UI", 9, "italic"))
 
         self._append_chat("sys", "¡Hola! Estoy listo para ayudarte aquí mismo de forma invisible.\n"
-                                 "Escribe cualquier duda o pregunta técnica abajo y presiona Enter para recibir una respuesta inmediata.\n")
+                                 "Presiona F2 para enfocar esta barra y escribir sin mover el ratón. Presiona Enter para enviar.\n")
 
         bar_input = tk.Frame(parent, bg="#181825", pady=4)
         bar_input.pack(fill="x", side="bottom")
@@ -280,6 +358,7 @@ class StealthWindowApp:
                                      insertbackground="#89b4fa", relief="flat")
         self.entry_prompt.pack(side="left", fill="x", expand=True, padx=(4, 6), ipady=5)
         self.entry_prompt.bind("<Return>", lambda e: self._send_ai_prompt())
+        self.entry_prompt.bind("<Escape>", lambda e: self.release_focus())
 
         self.btn_send = tk.Button(bar_input, text="Enviar (Enter)", command=self._send_ai_prompt,
                                   bg="#89b4fa", fg="#11111b", font=("Segoe UI", 9, "bold"), relief="flat", padx=10, pady=4)
@@ -414,6 +493,7 @@ class StealthWindowApp:
                                  font=("Segoe UI", self.font_size), padx=8, pady=8,
                                  yscrollcommand=scroll.set, relief="flat", borderwidth=0)
         self.txt_notes.pack(side="left", fill="both", expand=True)
+        self.txt_notes.bind("<Escape>", lambda e: self.release_focus())
         scroll.config(command=self.txt_notes.yview)
 
         self.txt_notes.tag_configure("highlight", background="#f9e2af", foreground="#11111b")
@@ -472,7 +552,6 @@ class StealthWindowApp:
                                        bg="#313244", fg="#cdd6f4", relief="flat", font=("Segoe UI", 8), padx=6, state="disabled")
         self.btn_next_page.pack(side="left", padx=2)
 
-        # Zoom de PDF
         btn_zoom_in = tk.Button(toolbar, text="🔍+", command=lambda: self._zoom_pdf(0.2),
                                 bg="#313244", fg="#cdd6f4", relief="flat", font=("Segoe UI", 8), padx=5)
         btn_zoom_in.pack(side="left", padx=(12, 2))
@@ -481,7 +560,6 @@ class StealthWindowApp:
                                  bg="#313244", fg="#cdd6f4", relief="flat", font=("Segoe UI", 8), padx=5)
         btn_zoom_out.pack(side="left", padx=2)
 
-        # Alternar modo visual / texto
         self.btn_toggle_pdf_mode = tk.Button(toolbar, text="Modo: Visual", command=self._toggle_pdf_view_mode,
                                              bg="#313244", fg="#a6e3a1", relief="flat", font=("Segoe UI", 8), padx=6)
         self.btn_toggle_pdf_mode.pack(side="right", padx=2)
@@ -489,7 +567,6 @@ class StealthWindowApp:
         frame_doc = tk.Frame(parent, bg="#181825")
         frame_doc.pack(fill="both", expand=True, pady=3)
 
-        # Canvas para renderizado visual de página PDF
         self.canvas_pdf = tk.Canvas(frame_doc, bg="#1e1e2e", highlightthickness=0)
         self.scroll_pdf_y = tk.Scrollbar(frame_doc, orient="vertical", command=self.canvas_pdf.yview)
         self.scroll_pdf_x = tk.Scrollbar(frame_doc, orient="horizontal", command=self.canvas_pdf.xview)
@@ -499,9 +576,9 @@ class StealthWindowApp:
         self.scroll_pdf_x.pack(side="bottom", fill="x")
         self.canvas_pdf.pack(side="left", fill="both", expand=True)
 
-        # Texto alternativo para archivos de texto plano
         self.txt_doc = tk.Text(frame_doc, wrap="word", bg="#1e1e2e", fg="#cdd6f4",
                                font=("Segoe UI", 10), padx=8, pady=8, relief="flat", borderwidth=0)
+        self.txt_doc.bind("<Escape>", lambda e: self.release_focus())
 
     def _toggle_pdf_view_mode(self):
         if not self.current_pdf_doc:
@@ -558,7 +635,6 @@ class StealthWindowApp:
             self.canvas_pdf.pack(side="left", fill="both", expand=True)
             self.canvas_pdf.delete("all")
 
-            # Renderizado visual nativo con PyMuPDF (resolución nítida)
             mat = fitz.Matrix(self.pdf_zoom, self.pdf_zoom)
             pix = page.get_pixmap(matrix=mat)
             ppm_data = pix.tobytes("ppm")
